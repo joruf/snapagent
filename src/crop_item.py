@@ -4,6 +4,8 @@ Resizable crop selection item.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsRectItem
@@ -14,8 +16,9 @@ class CropSelectionItem(QGraphicsRectItem):
     Provides a draggable and resizable crop rectangle with handles.
     """
 
-    HANDLE_SIZE = 10.0
-    MIN_SIZE = 8.0
+    HANDLE_SIZE = 16.0
+    MIN_SIZE = 12.0
+    BORDER_HIT_TOLERANCE = 8.0
     HANDLE_NAMES = (
         "top_left",
         "top",
@@ -43,6 +46,7 @@ class CropSelectionItem(QGraphicsRectItem):
         self.setAcceptHoverEvents(True)
         self._active_handle: str | None = None
         self._resizing = False
+        self.on_geometry_changed: Callable[[], None] | None = None
 
         border_pen = QPen(QColor(52, 152, 219, 230), 2.0, Qt.PenStyle.DashLine)
         self.setPen(border_pen)
@@ -124,6 +128,8 @@ class CropSelectionItem(QGraphicsRectItem):
 
         if event.button() == Qt.MouseButton.LeftButton:
             handle_name = self._handle_at(event.pos())
+            if handle_name is None:
+                handle_name = self._border_handle_at(event.pos())
             if handle_name is not None:
                 self._active_handle = handle_name
                 self._resizing = True
@@ -165,8 +171,10 @@ class CropSelectionItem(QGraphicsRectItem):
             self._active_handle = None
             if self.scene() is not None and self.scene().mouseGrabberItem() is self:
                 self.ungrabMouse()
+            self._notify_geometry_changed()
             event.accept()
             return
+        self._notify_geometry_changed()
         super().mouseReleaseEvent(event)
 
     def scene_rect(self) -> QRectF:
@@ -221,14 +229,14 @@ class CropSelectionItem(QGraphicsRectItem):
         x_mid = rect.width() / 2.0
         y_mid = rect.height() / 2.0
         return {
-            "top_left": QRectF(-handle_size / 2.0, -handle_size / 2.0, handle_size, handle_size),
-            "top": QRectF(x_mid - handle_size / 2.0, -handle_size / 2.0, handle_size, handle_size),
-            "top_right": QRectF(rect.width() - handle_size / 2.0, -handle_size / 2.0, handle_size, handle_size),
-            "right": QRectF(rect.width() - handle_size / 2.0, y_mid - handle_size / 2.0, handle_size, handle_size),
-            "bottom_right": QRectF(rect.width() - handle_size / 2.0, rect.height() - handle_size / 2.0, handle_size, handle_size),
-            "bottom": QRectF(x_mid - handle_size / 2.0, rect.height() - handle_size / 2.0, handle_size, handle_size),
-            "bottom_left": QRectF(-handle_size / 2.0, rect.height() - handle_size / 2.0, handle_size, handle_size),
-            "left": QRectF(-handle_size / 2.0, y_mid - handle_size / 2.0, handle_size, handle_size),
+            "top_left": QRectF(0.0, 0.0, handle_size, handle_size),
+            "top": QRectF(x_mid - handle_size / 2.0, 0.0, handle_size, handle_size),
+            "top_right": QRectF(rect.width() - handle_size, 0.0, handle_size, handle_size),
+            "right": QRectF(rect.width() - handle_size, y_mid - handle_size / 2.0, handle_size, handle_size),
+            "bottom_right": QRectF(rect.width() - handle_size, rect.height() - handle_size, handle_size, handle_size),
+            "bottom": QRectF(x_mid - handle_size / 2.0, rect.height() - handle_size, handle_size, handle_size),
+            "bottom_left": QRectF(0.0, rect.height() - handle_size, handle_size, handle_size),
+            "left": QRectF(0.0, y_mid - handle_size / 2.0, handle_size, handle_size),
         }
 
     def _handle_at(self, local_pos: QPointF) -> str | None:
@@ -246,6 +254,45 @@ class CropSelectionItem(QGraphicsRectItem):
             rect = self._handle_rects()[handle_name]
             if rect.contains(local_pos):
                 return handle_name
+        return None
+
+    def _border_handle_at(self, local_pos: QPointF) -> str | None:
+        """
+        Infers resize handle from border-near positions.
+
+        Args:
+            local_pos: Local item coordinates.
+
+        Returns:
+            str | None: Inferred handle key or None.
+        """
+
+        rect = self.rect()
+        tolerance = self.BORDER_HIT_TOLERANCE
+        if rect.width() <= 0 or rect.height() <= 0:
+            return None
+
+        near_left = abs(local_pos.x() - rect.left()) <= tolerance
+        near_right = abs(local_pos.x() - rect.right()) <= tolerance
+        near_top = abs(local_pos.y() - rect.top()) <= tolerance
+        near_bottom = abs(local_pos.y() - rect.bottom()) <= tolerance
+
+        if near_top and near_left:
+            return "top_left"
+        if near_top and near_right:
+            return "top_right"
+        if near_bottom and near_left:
+            return "bottom_left"
+        if near_bottom and near_right:
+            return "bottom_right"
+        if near_top:
+            return "top"
+        if near_bottom:
+            return "bottom"
+        if near_left:
+            return "left"
+        if near_right:
+            return "right"
         return None
 
     def _resize_from_handle(self, handle_name: str, scene_pos: QPointF) -> None:
@@ -279,3 +326,32 @@ class CropSelectionItem(QGraphicsRectItem):
         self.setPos(resized.topLeft())
         self.setRect(QRectF(0.0, 0.0, resized.width(), resized.height()))
         self.update()
+        self._notify_geometry_changed()
+
+    def itemChange(self, change, value):  # type: ignore[override]
+        """
+        Notifies geometry updates after item movement.
+
+        Args:
+            change: Item change enum.
+            value: Proposed value.
+
+        Returns:
+            object: Value passed through to Qt.
+        """
+
+        result = super().itemChange(change, value)
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            self._notify_geometry_changed()
+        return result
+
+    def _notify_geometry_changed(self) -> None:
+        """
+        Triggers optional geometry-changed callback.
+
+        Returns:
+            None
+        """
+
+        if self.on_geometry_changed is not None:
+            self.on_geometry_changed()

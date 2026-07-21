@@ -5,6 +5,7 @@ SnapAgent application entry point.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import sys
 from pathlib import Path
@@ -18,6 +19,9 @@ if TYPE_CHECKING:
     from PySide6.QtWidgets import QApplication
     from src.capture import CaptureRequest
     from src.editor_window import EditorWindow
+
+
+_INSTANCE_LOCK_HANDLE = None
 
 
 def _project_root() -> Path:
@@ -181,6 +185,32 @@ def _ensure_desktop_launcher() -> None:
         "NoDisplay=true\n"
     )
     editor_launcher_path.write_text(editor_content, encoding="utf-8")
+
+
+def _acquire_single_instance_lock() -> bool:
+    """
+    Acquires a non-blocking process lock to enforce single instance.
+
+    Returns:
+        bool: True when lock was acquired, otherwise False.
+    """
+
+    global _INSTANCE_LOCK_HANDLE
+    lock_dir = Path.home() / ".cache" / "snapagent"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "snapagent.lock"
+    handle = lock_path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return False
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    _INSTANCE_LOCK_HANDLE = handle
+    return True
 
 
 class AppController:
@@ -596,6 +626,9 @@ def main() -> int:
     runtime_code = _ensure_qt_runtime()
     if runtime_code != 0:
         return runtime_code
+    if not _acquire_single_instance_lock():
+        print("SnapAgent is already running.")
+        return 0
     _ensure_desktop_launcher()
 
     from PySide6.QtGui import QIcon

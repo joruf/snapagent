@@ -34,14 +34,18 @@ class StyleState:
     Attributes:
         stroke_color: Pen color.
         fill_color: Brush color.
+        text_color: Text color.
         stroke_width: Pen thickness.
         font_size: Font size for text annotations.
+        font_family: Font family for text annotations.
     """
 
     stroke_color: QColor
     fill_color: QColor
+    text_color: QColor
     stroke_width: float
     font_size: int
+    font_family: str
 
 
 class ArrowItem(QGraphicsLineItem):
@@ -216,6 +220,7 @@ def annotation_from_item(item: QGraphicsItem) -> AnnotationModel | None:
             stroke_width=1.0,
             text=text_item.toPlainText(),
             font_size=text_item.font().pointSize(),
+            font_family=text_item.font().family(),
         )
 
     if annotation_type == "image":
@@ -289,6 +294,8 @@ def add_annotation_to_scene(
         item = scene.addText(annotation.text)
         font = QFont(item.font())
         font.setPointSize(annotation.font_size)
+        if annotation.font_family:
+            font.setFamily(annotation.font_family)
         item.setFont(font)
         item.setDefaultTextColor(stroke)
         item.setPos(annotation.x, annotation.y)

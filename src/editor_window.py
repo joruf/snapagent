@@ -10,6 +10,8 @@ from typing import Any
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import (
     QAction,
+    QColor,
+    QFontDatabase,
     QGuiApplication,
     QKeySequence,
     QPainter,
@@ -21,7 +23,9 @@ from PySide6.QtGui import (
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
+    QComboBox,
     QColorDialog,
+    QFrame,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -77,6 +81,9 @@ class EditorWindow(QMainWindow):
         self._record_history = True
         self._history: list[dict[str, Any]] = []
         self._history_index = -1
+        self._current_stroke_color = QColor(231, 76, 60, 255)
+        self._current_fill_color = QColor(231, 76, 60, 80)
+        self._current_text_color = QColor(44, 62, 80, 255)
 
         container = QWidget(self)
         self.setCentralWidget(container)
@@ -90,6 +97,7 @@ class EditorWindow(QMainWindow):
         self.canvas.zoom_changed.connect(self._on_zoom_changed)
         self.canvas.selection_style_changed.connect(self._on_selection_style_changed)
         self.canvas.crop_selection_changed.connect(self._on_crop_state_changed)
+        self.canvas.crop_applied.connect(self._on_crop_applied)
 
         self._toolbar_widget = self._build_toolbar()
         root.addWidget(self._toolbar_widget)
@@ -105,7 +113,8 @@ class EditorWindow(QMainWindow):
             "QToolButton, QPushButton { background: #2f3543; color: #e7ecf2; border: 1px solid #434d63; border-radius: 4px; padding: 4px 8px; }"
             "QToolButton:checked { background: #2f7dd1; border: 1px solid #2f7dd1; color: white; }"
             "QPushButton:hover, QToolButton:hover { background: #3a4357; }"
-            "QSpinBox { background: #2f3543; border: 1px solid #434d63; border-radius: 4px; padding: 3px; }"
+            "QSpinBox, QComboBox { background: #2f3543; border: 1px solid #434d63; border-radius: 4px; padding: 3px; }"
+            "QFrame[toolbarGroup=\"true\"] { border: 1px solid #3b4559; border-radius: 6px; background: #222938; }"
         )
 
     def _build_toolbar(self) -> QWidget:
@@ -117,10 +126,24 @@ class EditorWindow(QMainWindow):
         """
 
         bar = QWidget(self)
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(6)
+        root_layout = QHBoxLayout(bar)
+        root_layout.setContentsMargins(8, 6, 8, 6)
+        root_layout.setSpacing(8)
 
+        palette_colors = [
+            QColor("#e74c3c"),
+            QColor("#f39c12"),
+            QColor("#f1c40f"),
+            QColor("#2ecc71"),
+            QColor("#1abc9c"),
+            QColor("#3498db"),
+            QColor("#9b59b6"),
+            QColor("#ecf0f1"),
+            QColor("#2c3e50"),
+            QColor("#000000"),
+        ]
+
+        tools_group, tools_layout = self._create_toolbar_group("Tools")
         self._tool_buttons: dict[str, QToolButton] = {}
         for tool_key, label in [
             (Tool.SELECT, "Select"),
@@ -129,45 +152,156 @@ class EditorWindow(QMainWindow):
             (Tool.LINE, "Line"),
             (Tool.ARROW, "Arrow"),
             (Tool.TEXT, "Text"),
+            (Tool.FILL_BG, "Bg Fill"),
             (Tool.CROP, "Crop"),
         ]:
             button = QToolButton()
             button.setText(label)
             button.setCheckable(True)
             button.clicked.connect(lambda checked, t=tool_key: self._set_tool(t))
-            layout.addWidget(button)
+            tools_layout.addWidget(button)
             self._tool_buttons[tool_key] = button
         self._tool_buttons[Tool.SELECT].setChecked(True)
 
         self.apply_crop_button = QPushButton("Apply Crop")
         self.apply_crop_button.setEnabled(False)
         self.apply_crop_button.clicked.connect(self.canvas.apply_pending_crop)
-        layout.addWidget(self.apply_crop_button)
+        tools_layout.addWidget(self.apply_crop_button)
 
-        self.stroke_button = QPushButton("Stroke")
-        self.stroke_button.clicked.connect(self._choose_stroke_color)
-        layout.addWidget(self.stroke_button)
-
-        self.fill_button = QPushButton("Fill")
-        self.fill_button.clicked.connect(self._choose_fill_color)
-        layout.addWidget(self.fill_button)
-
-        layout.addWidget(QLabel("Size"))
+        tools_layout.addWidget(QLabel("Border"))
         self.stroke_size_spin = QSpinBox()
         self.stroke_size_spin.setRange(1, 32)
         self.stroke_size_spin.setValue(3)
         self.stroke_size_spin.valueChanged.connect(self._stroke_width_changed)
-        layout.addWidget(self.stroke_size_spin)
+        tools_layout.addWidget(self.stroke_size_spin)
+        root_layout.addWidget(tools_group)
 
-        layout.addWidget(QLabel("Font"))
-        self.font_size_spin = QSpinBox()
-        self.font_size_spin.setRange(8, 120)
-        self.font_size_spin.setValue(16)
-        self.font_size_spin.valueChanged.connect(self._font_size_changed)
-        layout.addWidget(self.font_size_spin)
+        colors_group = QFrame(self)
+        colors_group.setFrameShape(QFrame.Shape.StyledPanel)
+        colors_group.setProperty("toolbarGroup", True)
+        colors_main_layout = QVBoxLayout(colors_group)
+        colors_main_layout.setContentsMargins(6, 4, 6, 4)
+        colors_main_layout.setSpacing(4)
+        colors_title = QLabel("Color Palette")
+        colors_title.setStyleSheet("font-size: 11px; color: #9fb2c9;")
+        colors_main_layout.addWidget(colors_title)
 
+        colors_layout = QVBoxLayout()
+        colors_layout.setContentsMargins(0, 0, 0, 0)
+        colors_layout.setSpacing(4)
+        colors_main_layout.addLayout(colors_layout)
+
+        stroke_row = QHBoxLayout()
+        stroke_row.setContentsMargins(0, 0, 0, 0)
+        stroke_row.setSpacing(4)
+        self.stroke_button = QPushButton("Border")
+        self.stroke_button.clicked.connect(self._choose_stroke_color)
+        stroke_row.addWidget(self.stroke_button)
+        for color in palette_colors:
+            stroke_row.addWidget(self._create_palette_button(color, "stroke"))
+        stroke_row.addStretch(1)
+        colors_layout.addLayout(stroke_row)
+
+        fill_row = QHBoxLayout()
+        fill_row.setContentsMargins(0, 0, 0, 0)
+        fill_row.setSpacing(4)
+        self.fill_button = QPushButton("Background")
+        self.fill_button.clicked.connect(self._choose_fill_color)
+        fill_row.addWidget(self.fill_button)
+        for color in palette_colors:
+            fill_row.addWidget(self._create_palette_button(color, "fill"))
+        fill_row.addStretch(1)
+        colors_layout.addLayout(fill_row)
+
+        text_row = QHBoxLayout()
+        text_row.setContentsMargins(0, 0, 0, 0)
+        text_row.setSpacing(4)
+        self.text_color_button = QPushButton("Text")
+        self.text_color_button.clicked.connect(self._choose_text_color)
+        text_row.addWidget(self.text_color_button)
+        for color in palette_colors:
+            text_row.addWidget(self._create_palette_button(color, "text"))
+        text_row.addStretch(1)
+        colors_layout.addLayout(text_row)
+
+        opacity_row = QHBoxLayout()
+        opacity_row.setContentsMargins(0, 0, 0, 0)
+        opacity_row.setSpacing(6)
+
+        opacity_row.addWidget(QLabel("Border Opacity"))
+        self.stroke_alpha_slider = QSlider(Qt.Orientation.Horizontal)
+        self.stroke_alpha_slider.setRange(0, 100)
+        self.stroke_alpha_slider.setValue(100)
+        self.stroke_alpha_slider.setFixedWidth(90)
+        self.stroke_alpha_slider.valueChanged.connect(self._stroke_alpha_changed)
+        opacity_row.addWidget(self.stroke_alpha_slider)
+        self.stroke_alpha_label = QLabel("100%")
+        opacity_row.addWidget(self.stroke_alpha_label)
+
+        opacity_row.addWidget(QLabel("Background Opacity"))
+        self.fill_alpha_slider = QSlider(Qt.Orientation.Horizontal)
+        self.fill_alpha_slider.setRange(0, 100)
+        self.fill_alpha_slider.setValue(31)
+        self.fill_alpha_slider.setFixedWidth(90)
+        self.fill_alpha_slider.valueChanged.connect(self._fill_alpha_changed)
+        opacity_row.addWidget(self.fill_alpha_slider)
+        self.fill_alpha_label = QLabel("31%")
+        opacity_row.addWidget(self.fill_alpha_label)
+
+        opacity_row.addWidget(QLabel("Text Opacity"))
+        self.text_alpha_slider = QSlider(Qt.Orientation.Horizontal)
+        self.text_alpha_slider.setRange(0, 100)
+        self.text_alpha_slider.setValue(100)
+        self.text_alpha_slider.setFixedWidth(90)
+        self.text_alpha_slider.valueChanged.connect(self._text_alpha_changed)
+        opacity_row.addWidget(self.text_alpha_slider)
+        self.text_alpha_label = QLabel("100%")
+        opacity_row.addWidget(self.text_alpha_label)
+        opacity_row.addStretch(1)
+        colors_layout.addLayout(opacity_row)
+        root_layout.addWidget(colors_group)
+
+        text_group, text_layout = self._create_toolbar_group("Text Style")
+        text_layout.addWidget(QLabel("Font"))
+        self.font_family_combo = QComboBox()
+        self.font_family_combo.setMinimumWidth(220)
+        self.font_family_combo.addItems(sorted(QFontDatabase.families()))
+        self.font_family_combo.currentTextChanged.connect(self._font_family_changed)
+        text_layout.addWidget(self.font_family_combo)
+
+        text_layout.addWidget(QLabel("Size"))
+        self.font_size_combo = QComboBox()
+        self.font_size_combo.addItems(
+            [
+                "8",
+                "9",
+                "10",
+                "11",
+                "12",
+                "14",
+                "16",
+                "18",
+                "20",
+                "24",
+                "28",
+                "32",
+                "40",
+                "48",
+                "56",
+                "64",
+                "72",
+                "96",
+                "120",
+            ]
+        )
+        self.font_size_combo.setCurrentText("16")
+        self.font_size_combo.currentTextChanged.connect(self._font_size_changed)
+        text_layout.addWidget(self.font_size_combo)
+        root_layout.addWidget(text_group)
+
+        zoom_group, zoom_layout = self._create_toolbar_group("Zoom")
         self.zoom_label = QLabel("100%")
-        layout.addWidget(self.zoom_label)
+        zoom_layout.addWidget(self.zoom_label)
 
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.zoom_slider.setRange(10, 400)
@@ -175,20 +309,120 @@ class EditorWindow(QMainWindow):
         self.zoom_slider.setFixedWidth(140)
         self.zoom_slider.setToolTip("Zoom: left smaller, right larger")
         self.zoom_slider.valueChanged.connect(self._zoom_slider_changed)
-        layout.addWidget(self.zoom_slider)
+        zoom_layout.addWidget(self.zoom_slider)
 
-        zoom_in = QPushButton("+")
-        zoom_in.clicked.connect(self.canvas.zoom_in)
-        layout.addWidget(zoom_in)
-        zoom_out = QPushButton("-")
-        zoom_out.clicked.connect(self.canvas.zoom_out)
-        layout.addWidget(zoom_out)
-        zoom_reset = QPushButton("Reset")
-        zoom_reset.clicked.connect(self.canvas.reset_zoom)
-        layout.addWidget(zoom_reset)
+        self.zoom_in_button = QPushButton("+")
+        self.zoom_in_button.clicked.connect(self.canvas.zoom_in)
+        zoom_layout.addWidget(self.zoom_in_button)
+        self.zoom_out_button = QPushButton("-")
+        self.zoom_out_button.clicked.connect(self.canvas.zoom_out)
+        zoom_layout.addWidget(self.zoom_out_button)
+        self.zoom_reset_button = QPushButton("Reset")
+        self.zoom_reset_button.clicked.connect(self.canvas.reset_zoom)
+        zoom_layout.addWidget(self.zoom_reset_button)
+        root_layout.addWidget(zoom_group)
 
-        layout.addStretch(1)
+        root_layout.addStretch(1)
+        self._update_color_button_preview(self.stroke_button, QColor("#e74c3c"))
+        self._update_color_button_preview(self.fill_button, QColor(231, 76, 60, 80))
+        self._update_color_button_preview(self.text_color_button, QColor("#2c3e50"))
+        self._apply_toolbar_tooltips()
         return bar
+
+    def _create_toolbar_group(self, title: str) -> tuple[QFrame, QHBoxLayout]:
+        """
+        Creates a framed toolbar group with a title label.
+
+        Args:
+            title: Visible group caption.
+
+        Returns:
+            tuple[QFrame, QHBoxLayout]: Group widget and content layout.
+        """
+
+        frame = QFrame(self)
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setProperty("toolbarGroup", True)
+        group_layout = QVBoxLayout(frame)
+        group_layout.setContentsMargins(6, 4, 6, 4)
+        group_layout.setSpacing(4)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 11px; color: #9fb2c9;")
+        group_layout.addWidget(title_label)
+
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(4)
+        group_layout.addLayout(content_layout)
+        return frame, content_layout
+
+    def _create_palette_button(self, color: QColor, target: str) -> QPushButton:
+        """
+        Builds one compact palette button for direct color assignment.
+
+        Args:
+            color: Palette color to apply.
+            target: Style target key (stroke, fill, text).
+
+        Returns:
+            QPushButton: Palette button.
+        """
+
+        button = QPushButton("")
+        button.setFixedSize(18, 18)
+        button.setToolTip(f"Apply {color.name()} to {target}")
+        button.setStyleSheet(
+            "QPushButton {"
+            f"background: {color.name(QColor.NameFormat.HexArgb)};"
+            "border: 1px solid #59657c;"
+            "border-radius: 3px;"
+            "padding: 0px;"
+            "}"
+        )
+        button.clicked.connect(
+            lambda _checked=False, t=target, c=QColor(color): self._apply_palette_color(
+                target=t,
+                color=c,
+            )
+        )
+        return button
+
+    def _apply_toolbar_tooltips(self) -> None:
+        """
+        Adds English tooltip text to all toolbar controls.
+
+        Returns:
+            None
+        """
+
+        tooltips = {
+            Tool.SELECT: "Select and move annotations.",
+            Tool.RECT: "Draw a rectangle annotation.",
+            Tool.ELLIPSE: "Draw a circle or ellipse annotation.",
+            Tool.LINE: "Draw a straight line annotation.",
+            Tool.ARROW: "Draw an arrow annotation.",
+            Tool.TEXT: "Insert a text annotation.",
+            Tool.FILL_BG: "Fill screenshot background area.",
+            Tool.CROP: "Create a crop selection area.",
+        }
+        for tool_key, button in self._tool_buttons.items():
+            button.setToolTip(tooltips.get(tool_key, "Use this tool."))
+
+        self.apply_crop_button.setToolTip("Apply current crop selection.")
+        self.stroke_size_spin.setToolTip("Set border line width.")
+        self.stroke_button.setToolTip("Open border color picker.")
+        self.fill_button.setToolTip("Open background color picker.")
+        self.text_color_button.setToolTip("Open text color picker.")
+        self.stroke_alpha_slider.setToolTip("Set border opacity.")
+        self.fill_alpha_slider.setToolTip("Set background opacity.")
+        self.text_alpha_slider.setToolTip("Set text opacity.")
+        self.font_family_combo.setToolTip("Select text font family.")
+        self.font_size_combo.setToolTip("Select text font size.")
+        self.zoom_slider.setToolTip("Adjust zoom level.")
+        self.zoom_in_button.setToolTip("Zoom in.")
+        self.zoom_out_button.setToolTip("Zoom out.")
+        self.zoom_reset_button.setToolTip("Reset zoom to fit.")
 
     def _build_menu(self) -> None:
         """
@@ -205,28 +439,34 @@ class EditorWindow(QMainWindow):
 
         open_action = QAction("Open Project...", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_action.setToolTip("Open an existing SnapAgent project.")
         open_action.triggered.connect(self.open_project)
         file_menu.addAction(open_action)
 
         save_action = QAction("Save Project As...", self)
         save_action.setShortcut(QKeySequence.StandardKey.SaveAs)
+        save_action.setToolTip("Save project under a new file name.")
         save_action.triggered.connect(self.save_project_as)
         file_menu.addAction(save_action)
 
         save_action = QAction("Save Project", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
+        save_action.setToolTip("Save changes to the current project.")
         save_action.triggered.connect(self.save_project)
         file_menu.addAction(save_action)
 
         export_png = QAction("Export as PNG...", self)
+        export_png.setToolTip("Export the composited image as PNG.")
         export_png.triggered.connect(lambda: self.export_image("PNG"))
         file_menu.addAction(export_png)
 
         export_jpg = QAction("Export as JPEG...", self)
+        export_jpg.setToolTip("Export the composited image as JPEG.")
         export_jpg.triggered.connect(lambda: self.export_image("JPG"))
         file_menu.addAction(export_jpg)
 
         export_pdf = QAction("Export as PDF...", self)
+        export_pdf.setToolTip("Export the composited image as PDF.")
         export_pdf.triggered.connect(self.export_pdf)
         file_menu.addAction(export_pdf)
 
@@ -234,6 +474,7 @@ class EditorWindow(QMainWindow):
 
         print_action = QAction("Print...", self)
         print_action.setShortcut(QKeySequence.StandardKey.Print)
+        print_action.setToolTip("Print the composited image.")
         print_action.triggered.connect(self.print_image)
         file_menu.addAction(print_action)
 
@@ -241,34 +482,41 @@ class EditorWindow(QMainWindow):
 
         close_action = QAction("Close", self)
         close_action.setShortcut(QKeySequence.StandardKey.Close)
+        close_action.setToolTip("Close this editor tab.")
         close_action.triggered.connect(self.close)
         file_menu.addAction(close_action)
 
         self.undo_action = QAction("Undo", self)
         self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        self.undo_action.setToolTip("Undo the last change.")
         self.undo_action.triggered.connect(self.undo)
         edit_menu.addAction(self.undo_action)
 
         self.redo_action = QAction("Redo", self)
         self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self.redo_action.setToolTip("Redo the last undone change.")
         self.redo_action.triggered.connect(self.redo)
         edit_menu.addAction(self.redo_action)
 
         paste_action = QAction("Paste", self)
         paste_action.setShortcut(QKeySequence.StandardKey.Paste)
+        paste_action.setToolTip("Paste text or image from clipboard.")
         paste_action.triggered.connect(lambda: self.canvas.paste_from_clipboard())
         edit_menu.addAction(paste_action)
 
         copy_image_action = QAction("Copy Image", self)
         copy_image_action.setShortcut(QKeySequence.StandardKey.Copy)
+        copy_image_action.setToolTip("Copy current composited image to clipboard.")
         copy_image_action.triggered.connect(self.copy_current_image_to_clipboard)
         edit_menu.addAction(copy_image_action)
 
         about_action = QAction("About", self)
+        about_action.setToolTip("Show application information.")
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
 
         shortcuts_action = QAction("Shortcuts & Manual", self)
+        shortcuts_action.setToolTip("Show manual and keyboard shortcuts.")
         shortcuts_action.triggered.connect(self.show_manual)
         help_menu.addAction(shortcuts_action)
 
@@ -304,7 +552,7 @@ class EditorWindow(QMainWindow):
             title="Select Stroke Color",
         )
         if color.isValid():
-            self.canvas.set_style(stroke_color=color)
+            self._set_target_color("stroke", color, apply_to_canvas=False)
             self._push_history_state()
 
     def _choose_fill_color(self) -> None:
@@ -321,8 +569,115 @@ class EditorWindow(QMainWindow):
             title="Select Fill Color",
         )
         if color.isValid():
-            self.canvas.set_style(fill_color=color)
+            self._set_target_color("fill", color, apply_to_canvas=False)
             self._push_history_state()
+
+    def _choose_text_color(self) -> None:
+        """
+        Opens alpha-enabled color picker for text color.
+
+        Returns:
+            None
+        """
+
+        color = QColorDialog.getColor(
+            options=QColorDialog.ColorDialogOption.ShowAlphaChannel,
+            parent=self,
+            title="Select Text Color",
+        )
+        if color.isValid():
+            self._set_target_color("text", color, apply_to_canvas=False)
+            self._push_history_state()
+
+    def _apply_palette_color(self, target: str, color: QColor) -> None:
+        """
+        Applies one predefined palette color to a style target.
+
+        Args:
+            target: Style target key (stroke, fill, text).
+            color: Selected palette color.
+
+        Returns:
+            None
+        """
+
+        current = self._color_for_target(target)
+        updated = QColor(color)
+        updated.setAlpha(current.alpha())
+        self._set_target_color(target, updated)
+        self._push_history_state()
+
+    def _set_target_color(self, target: str, color: QColor, apply_to_canvas: bool = True) -> None:
+        """
+        Applies one target color to canvas and toolbar state.
+
+        Args:
+            target: Style target key (stroke, fill, text).
+            color: New target color.
+            apply_to_canvas: True to apply style changes to selected canvas items.
+
+        Returns:
+            None
+        """
+
+        if target == "stroke":
+            self._current_stroke_color = QColor(color)
+            if apply_to_canvas:
+                self.canvas.set_style(stroke_color=color)
+            self._update_color_button_preview(self.stroke_button, color)
+            self._set_alpha_slider_value(self.stroke_alpha_slider, self.stroke_alpha_label, color)
+            return
+        if target == "fill":
+            self._current_fill_color = QColor(color)
+            if apply_to_canvas:
+                self.canvas.set_style(fill_color=color)
+            self._update_color_button_preview(self.fill_button, color)
+            self._set_alpha_slider_value(self.fill_alpha_slider, self.fill_alpha_label, color)
+            return
+        self._current_text_color = QColor(color)
+        if apply_to_canvas:
+            self.canvas.set_style(text_color=color)
+        self._update_color_button_preview(self.text_color_button, color)
+        self._set_alpha_slider_value(self.text_alpha_slider, self.text_alpha_label, color)
+
+    def _color_for_target(self, target: str) -> QColor:
+        """
+        Returns current toolbar color for one style target.
+
+        Args:
+            target: Style target key.
+
+        Returns:
+            QColor: Current target color.
+        """
+
+        if target == "stroke":
+            return QColor(self._current_stroke_color)
+        if target == "fill":
+            return QColor(self._current_fill_color)
+        return QColor(self._current_text_color)
+
+    def _update_color_button_preview(self, button: QPushButton, color: QColor) -> None:
+        """
+        Sets the button background to preview the active color.
+
+        Args:
+            button: Button to style.
+            color: Displayed color.
+
+        Returns:
+            None
+        """
+
+        button.setStyleSheet(
+            "QPushButton {"
+            f"background: {color.name(QColor.NameFormat.HexArgb)};"
+            "color: #e7ecf2;"
+            "border: 1px solid #434d63;"
+            "border-radius: 4px;"
+            "padding: 4px 8px;"
+            "}"
+        )
 
     def _stroke_width_changed(self, value: int) -> None:
         """
@@ -338,18 +693,130 @@ class EditorWindow(QMainWindow):
         self.canvas.set_style(stroke_width=float(value))
         self._push_history_state()
 
-    def _font_size_changed(self, value: int) -> None:
+    def _stroke_alpha_changed(self, value: int) -> None:
         """
-        Updates active and selected text font size.
+        Updates stroke opacity from toolbar slider.
 
         Args:
-            value: New font size in points.
+            value: Opacity percentage.
 
         Returns:
             None
         """
 
-        self.canvas.set_style(font_size=value)
+        self._apply_target_alpha("stroke", value)
+        self._push_history_state()
+
+    def _fill_alpha_changed(self, value: int) -> None:
+        """
+        Updates background opacity from toolbar slider.
+
+        Args:
+            value: Opacity percentage.
+
+        Returns:
+            None
+        """
+
+        self._apply_target_alpha("fill", value)
+        self._push_history_state()
+
+    def _text_alpha_changed(self, value: int) -> None:
+        """
+        Updates text opacity from toolbar slider.
+
+        Args:
+            value: Opacity percentage.
+
+        Returns:
+            None
+        """
+
+        self._apply_target_alpha("text", value)
+        self._push_history_state()
+
+    def _apply_target_alpha(self, target: str, value: int) -> None:
+        """
+        Applies alpha percentage to current target color.
+
+        Args:
+            target: Style target key.
+            value: Opacity percentage from 0 to 100.
+
+        Returns:
+            None
+        """
+
+        alpha_value = max(0, min(255, round((value / 100.0) * 255)))
+        color = self._color_for_target(target)
+        color.setAlpha(alpha_value)
+        self._set_target_color(target, color)
+
+    def _set_alpha_slider_value(self, slider: QSlider, label: QLabel, color: QColor) -> None:
+        """
+        Synchronizes one opacity slider and label from color alpha.
+
+        Args:
+            slider: Slider control for opacity.
+            label: Label showing opacity percent.
+            color: Source color with alpha channel.
+
+        Returns:
+            None
+        """
+
+        percent = max(0, min(100, round((color.alpha() / 255.0) * 100)))
+        slider.blockSignals(True)
+        slider.setValue(percent)
+        slider.blockSignals(False)
+        label.setText(f"{percent}%")
+
+    def _set_font_size_combo_value(self, value: int) -> None:
+        """
+        Synchronizes font-size select box with one numeric value.
+
+        Args:
+            value: Font size in points.
+
+        Returns:
+            None
+        """
+
+        text_value = str(value)
+        if self.font_size_combo.findText(text_value) < 0:
+            self.font_size_combo.addItem(text_value)
+        self.font_size_combo.blockSignals(True)
+        self.font_size_combo.setCurrentText(text_value)
+        self.font_size_combo.blockSignals(False)
+
+    def _font_size_changed(self, value: str) -> None:
+        """
+        Updates active and selected text font size.
+
+        Args:
+            value: New font size in points as text.
+
+        Returns:
+            None
+        """
+
+        if not value.isdigit():
+            return
+        self.canvas.set_style(font_size=int(value))
+        self._push_history_state()
+
+    def _font_family_changed(self, value: str) -> None:
+        """
+        Updates active and selected text font family.
+
+        Args:
+            value: New font family name.
+
+        Returns:
+            None
+        """
+
+        self.canvas.set_style(font_family=value)
         self._push_history_state()
 
     def _on_zoom_changed(self, zoom_factor: float) -> None:
@@ -408,11 +875,45 @@ class EditorWindow(QMainWindow):
             self.stroke_size_spin.blockSignals(True)
             self.stroke_size_spin.setValue(max(1, int(stroke_width)))
             self.stroke_size_spin.blockSignals(False)
+
+        stroke_rgba = payload.get("stroke_rgba")
+        if isinstance(stroke_rgba, list) and len(stroke_rgba) == 4:
+            color = QColor(
+                int(stroke_rgba[0]),
+                int(stroke_rgba[1]),
+                int(stroke_rgba[2]),
+                int(stroke_rgba[3]),
+            )
+            self._set_target_color("stroke", color)
+
+        fill_rgba = payload.get("fill_rgba")
+        if isinstance(fill_rgba, list) and len(fill_rgba) == 4:
+            color = QColor(
+                int(fill_rgba[0]),
+                int(fill_rgba[1]),
+                int(fill_rgba[2]),
+                int(fill_rgba[3]),
+            )
+            self._set_target_color("fill", color)
+
+        text_rgba = payload.get("text_rgba")
+        if isinstance(text_rgba, list) and len(text_rgba) == 4:
+            color = QColor(
+                int(text_rgba[0]),
+                int(text_rgba[1]),
+                int(text_rgba[2]),
+                int(text_rgba[3]),
+            )
+            self._set_target_color("text", color)
+
         font_size = payload.get("font_size")
         if isinstance(font_size, int):
-            self.font_size_spin.blockSignals(True)
-            self.font_size_spin.setValue(font_size)
-            self.font_size_spin.blockSignals(False)
+            self._set_font_size_combo_value(font_size)
+        font_family = payload.get("font_family")
+        if isinstance(font_family, str) and font_family.strip():
+            self.font_family_combo.blockSignals(True)
+            self.font_family_combo.setCurrentText(font_family.strip())
+            self.font_family_combo.blockSignals(False)
 
     def _on_crop_state_changed(self, is_active: bool) -> None:
         """
@@ -426,6 +927,16 @@ class EditorWindow(QMainWindow):
         """
 
         self.apply_crop_button.setEnabled(is_active)
+
+    def _on_crop_applied(self) -> None:
+        """
+        Switches back to select tool after crop apply.
+
+        Returns:
+            None
+        """
+
+        self._set_tool(Tool.SELECT)
 
     def _serialize_state(self) -> dict[str, Any]:
         """

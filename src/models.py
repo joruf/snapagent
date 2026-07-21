@@ -39,6 +39,7 @@ class AnnotationModel:
     stroke_width: float
     text: str = ""
     font_size: int = 16
+    font_family: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -60,6 +61,7 @@ class AnnotationModel:
             "stroke_width": self.stroke_width,
             "text": self.text,
             "font_size": self.font_size,
+            "font_family": self.font_family,
             "payload": self.payload,
         }
 
@@ -86,6 +88,7 @@ class AnnotationModel:
             stroke_width=float(data.get("stroke_width", 2)),
             text=str(data.get("text", "")),
             font_size=int(data.get("font_size", 16)),
+            font_family=str(data.get("font_family", "")),
             payload=dict(data.get("payload", {})),
         )
 

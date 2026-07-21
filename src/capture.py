@@ -117,8 +117,10 @@ class CapturePanel(QWidget):
         self.delay_slider.setRange(0, 20)
         self.delay_slider.setValue(0)
         self.delay_slider.valueChanged.connect(self._sync_delay_label_from_slider)
+        self.delay_slider.setToolTip("Delay capture start in seconds.")
 
         self.delay_value_label = QLabel("0 s")
+        self.delay_value_label.setToolTip("Current delay before capture starts.")
         delay_row = QHBoxLayout()
         delay_row.addWidget(self.delay_slider, 1)
         delay_row.addWidget(self.delay_value_label)
@@ -126,6 +128,7 @@ class CapturePanel(QWidget):
 
         self.autostart_checkbox = QCheckBox("Start at login")
         self.autostart_checkbox.toggled.connect(self.autostart_toggled.emit)
+        self.autostart_checkbox.setToolTip("Launch SnapAgent automatically after login.")
         form.addRow("Autostart:", self.autostart_checkbox)
         self._minimize_to_tray_on_close = True
 
@@ -134,18 +137,21 @@ class CapturePanel(QWidget):
         self.capture_fullscreen_button.clicked.connect(
             lambda: self._emit_request_for_mode(CaptureMode.FULL_SCREEN)
         )
+        self.capture_fullscreen_button.setToolTip("Capture all screens immediately.")
         buttons.addWidget(self.capture_fullscreen_button)
 
         self.capture_area_button = QPushButton("Capture Area")
         self.capture_area_button.clicked.connect(
             lambda: self._emit_request_for_mode(CaptureMode.REGION)
         )
+        self.capture_area_button.setToolTip("Select and capture a custom screen region.")
         buttons.addWidget(self.capture_area_button)
 
         self.capture_window_button = QPushButton("Capture Window")
         self.capture_window_button.clicked.connect(
             lambda: self._emit_request_for_mode(CaptureMode.WINDOW)
         )
+        self.capture_window_button.setToolTip("Select one application window to capture.")
         buttons.addWidget(self.capture_window_button)
 
         root_layout.addLayout(buttons)
@@ -311,9 +317,21 @@ class RegionCaptureOverlay(QWidget):
         painter.fillRect(self.rect(), QColor(0, 0, 0, 60))
         if self._dragging:
             selection = QRect(self._start_point, self._current_point).normalized()
-            painter.drawPixmap(selection, self._screenshot, selection)
-            painter.setPen(QPen(QColor(52, 152, 219), 2))
-            painter.drawRect(selection)
+            if selection.width() > 0 and selection.height() > 0:
+                painter.drawPixmap(selection, self._screenshot, selection)
+
+                # Draw a high-contrast double border so selection is always visible.
+                outer_pen = QPen(QColor(255, 255, 255, 240), 2)
+                inner_pen = QPen(QColor(52, 152, 219, 255), 1, Qt.PenStyle.DashLine)
+                outer_rect = selection.adjusted(0, 0, -1, -1)
+                inner_rect = selection.adjusted(1, 1, -2, -2)
+
+                painter.setPen(outer_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(outer_rect)
+
+                painter.setPen(inner_pen)
+                painter.drawRect(inner_rect)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """
