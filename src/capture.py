@@ -11,7 +11,18 @@ from shutil import which
 from typing import Callable
 
 from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QGuiApplication, QMouseEvent, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QGuiApplication,
+    QIcon,
+    QLinearGradient,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QFormLayout,
@@ -75,6 +86,7 @@ class CapturePanel(QWidget):
     """
 
     capture_requested = Signal(CaptureRequest)
+    color_pick_requested = Signal()
     autostart_toggled = Signal(bool)
     close_requested = Signal()
     editor_requested = Signal()
@@ -167,6 +179,15 @@ class CapturePanel(QWidget):
         )
         self.capture_window_button.setToolTip("Select one application window to capture.")
         buttons.addWidget(self.capture_window_button)
+
+        self.pick_color_button = QPushButton("")
+        self.pick_color_button.setIcon(_build_color_picker_icon())
+        self.pick_color_button.setFixedSize(32, 32)
+        self.pick_color_button.setToolTip(
+            "Pick a color from the screen and copy it to clipboard."
+        )
+        self.pick_color_button.clicked.connect(self.color_pick_requested.emit)
+        buttons.addWidget(self.pick_color_button)
 
         root_layout.addLayout(buttons)
 
@@ -546,6 +567,195 @@ class WindowCaptureOverlay(QWidget):
             self.capture_cancelled.emit()
             self.close()
 
+
+class ColorPickerOverlay(QWidget):
+    """
+    Full-screen overlay for picking one color from the screenshot.
+    """
+
+    color_picked = Signal(str)
+    pick_cancelled = Signal()
+
+    def __init__(self, screenshot: QPixmap, virtual_geometry: QRect) -> None:
+        """
+        Initializes color picker overlay with screenshot background.
+
+        Args:
+            screenshot: Current desktop screenshot.
+            virtual_geometry: Combined virtual desktop geometry.
+        """
+
+        super().__init__()
+        self._screenshot = screenshot
+        self._virtual_geometry = virtual_geometry
+        self._hover_point = QPoint(-1, -1)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setGeometry(self._virtual_geometry)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def paintEvent(self, _) -> None:
+        """
+        Paints the screenshot and current color preview marker.
+
+        Returns:
+            None
+        """
+
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._screenshot)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 20))
+        if not self.rect().contains(self._hover_point):
+            return
+        self._draw_crossfade_guides(painter, self._hover_point)
+        color = self._color_at(self._hover_point)
+        if color is None:
+            return
+
+        marker_size = 20
+        marker_rect = QRect(
+            self._hover_point.x() + 14,
+            self._hover_point.y() + 14,
+            marker_size,
+            marker_size,
+        )
+        if marker_rect.right() > self.width():
+            marker_rect.moveRight(self.width() - 2)
+        if marker_rect.bottom() > self.height():
+            marker_rect.moveBottom(self.height() - 2)
+        painter.setPen(QPen(QColor(240, 240, 240), 1))
+        painter.setBrush(color)
+        painter.drawRect(marker_rect)
+        painter.setPen(QPen(QColor(255, 255, 255), 1))
+        painter.drawText(
+            QRect(marker_rect.x(), marker_rect.bottom() + 2, 120, 18),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            color.name().upper(),
+        )
+
+    def _draw_crossfade_guides(self, painter: QPainter, point: QPoint) -> None:
+        """
+        Draws fading guide lines from cursor to all overlay edges.
+
+        Args:
+            painter: Active overlay painter.
+            point: Cursor position in local overlay coordinates.
+
+        Returns:
+            None
+        """
+
+        fade_color = QColor(255, 255, 255, 170)
+        transparent = QColor(255, 255, 255, 0)
+
+        left_gradient = QLinearGradient(point.x(), point.y(), 0, point.y())
+        left_gradient.setColorAt(0.0, fade_color)
+        left_gradient.setColorAt(1.0, transparent)
+        left_pen = QPen()
+        left_pen.setWidthF(1.2)
+        left_pen.setBrush(left_gradient)
+        painter.setPen(left_pen)
+        painter.drawLine(point.x(), point.y(), 0, point.y())
+
+        right_gradient = QLinearGradient(point.x(), point.y(), self.width(), point.y())
+        right_gradient.setColorAt(0.0, fade_color)
+        right_gradient.setColorAt(1.0, transparent)
+        right_pen = QPen()
+        right_pen.setWidthF(1.2)
+        right_pen.setBrush(right_gradient)
+        painter.setPen(right_pen)
+        painter.drawLine(point.x(), point.y(), self.width(), point.y())
+
+        top_gradient = QLinearGradient(point.x(), point.y(), point.x(), 0)
+        top_gradient.setColorAt(0.0, fade_color)
+        top_gradient.setColorAt(1.0, transparent)
+        top_pen = QPen()
+        top_pen.setWidthF(1.2)
+        top_pen.setBrush(top_gradient)
+        painter.setPen(top_pen)
+        painter.drawLine(point.x(), point.y(), point.x(), 0)
+
+        bottom_gradient = QLinearGradient(point.x(), point.y(), point.x(), self.height())
+        bottom_gradient.setColorAt(0.0, fade_color)
+        bottom_gradient.setColorAt(1.0, transparent)
+        bottom_pen = QPen()
+        bottom_pen.setWidthF(1.2)
+        bottom_pen.setBrush(bottom_gradient)
+        painter.setPen(bottom_pen)
+        painter.drawLine(point.x(), point.y(), point.x(), self.height())
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        """
+        Updates hover marker while moving the cursor.
+
+        Args:
+            event: Mouse move event.
+
+        Returns:
+            None
+        """
+
+        self._hover_point = event.position().toPoint()
+        self.update()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """
+        Picks color from screen on left click.
+
+        Args:
+            event: Mouse press event.
+
+        Returns:
+            None
+        """
+
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        color = self._color_at(event.position().toPoint())
+        if color is None:
+            self.pick_cancelled.emit()
+        else:
+            self.color_picked.emit(color.name().upper())
+        self.close()
+
+    def keyPressEvent(self, event) -> None:
+        """
+        Cancels color picking when Escape is pressed.
+
+        Args:
+            event: Key event.
+
+        Returns:
+            None
+        """
+
+        if event.key() == Qt.Key.Key_Escape:
+            self.pick_cancelled.emit()
+            self.close()
+
+    def _color_at(self, local_pos: QPoint) -> QColor | None:
+        """
+        Resolves screenshot color at a local overlay position.
+
+        Args:
+            local_pos: Overlay-local point.
+
+        Returns:
+            QColor | None: Pixel color or None if out of range.
+        """
+
+        if local_pos.x() < 0 or local_pos.y() < 0:
+            return None
+        if local_pos.x() >= self._screenshot.width() or local_pos.y() >= self._screenshot.height():
+            return None
+        image = self._screenshot.toImage()
+        return image.pixelColor(local_pos)
+
     def _to_local_rect(self, global_rect: QRect) -> QRect:
         """
         Converts a global desktop rect into local overlay coordinates.
@@ -834,6 +1044,37 @@ def capture_full_screen() -> DesktopSnapshot:
     return DesktopSnapshot(pixmap=composed, virtual_geometry=virtual_geometry)
 
 
+def execute_color_pick(
+    on_picked: Callable[[str], None],
+    on_cancel: Callable[[], None],
+) -> None:
+    """
+    Starts interactive color picking from the current desktop screenshot.
+
+    Args:
+        on_picked: Callback with picked HEX color.
+        on_cancel: Callback when picking is cancelled.
+
+    Returns:
+        None
+    """
+
+    snapshot = capture_full_screen()
+    if snapshot.pixmap.isNull() or snapshot.virtual_geometry.isNull():
+        on_cancel()
+        return
+
+    overlay = ColorPickerOverlay(snapshot.pixmap, snapshot.virtual_geometry)
+    _track_overlay(overlay)
+    overlay.color_picked.connect(on_picked)
+    overlay.color_picked.connect(lambda _hex: _untrack_overlay(overlay))
+    overlay.pick_cancelled.connect(on_cancel)
+    overlay.pick_cancelled.connect(lambda: _untrack_overlay(overlay))
+    overlay.show()
+    overlay.raise_()
+    overlay.activateWindow()
+
+
 def execute_capture_request(
     request: CaptureRequest,
     on_capture: Callable[[QPixmap], None],
@@ -981,4 +1222,27 @@ def _untrack_overlay(overlay: QWidget) -> None:
 
     if overlay in _ACTIVE_OVERLAYS:
         _ACTIVE_OVERLAYS.remove(overlay)
+
+
+def _build_color_picker_icon() -> QIcon:
+    """
+    Renders a compact eyedropper icon for capture panel action.
+
+    Returns:
+        QIcon: Icon image.
+    """
+
+    icon = QPixmap(18, 18)
+    icon.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(icon)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(QColor(237, 242, 248), 1.6)
+    painter.setPen(pen)
+    painter.drawLine(4, 13, 13, 4)
+    path = QPainterPath()
+    path.addEllipse(11.5, 2.5, 4, 4)
+    painter.drawPath(path)
+    painter.drawLine(3, 14, 2, 16)
+    painter.end()
+    return QIcon(icon)
 

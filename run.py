@@ -378,6 +378,7 @@ class AppController:
         self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
         self.capture_panel = CapturePanel()
         self.capture_panel.capture_requested.connect(self.start_capture)
+        self.capture_panel.color_pick_requested.connect(self.start_color_pick)
         self.capture_panel.autostart_toggled.connect(self.toggle_autostart)
         self.capture_panel.close_requested.connect(self._hide_to_tray)
         self.capture_panel.editor_requested.connect(self.open_editor_from_capture)
@@ -500,6 +501,38 @@ class AppController:
             request=request,
             on_capture=on_capture_done,
             on_cancel=on_capture_cancelled,
+        )
+
+    def start_color_pick(self) -> None:
+        """
+        Starts capture overlay mode for copying one screen color.
+
+        Returns:
+            None
+        """
+
+        from PySide6.QtGui import QGuiApplication
+        from src.capture import execute_color_pick
+
+        self.capture_panel.hide()
+
+        def on_color_picked(hex_color: str) -> None:
+            QGuiApplication.clipboard().setText(hex_color)
+            self.capture_panel.show()
+            if self._tray_available and self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    APP_NAME,
+                    f"Copied color {hex_color} to clipboard.",
+                    self.tray_icon.MessageIcon.Information,
+                    2200,
+                )
+
+        def on_color_pick_cancelled() -> None:
+            self.capture_panel.show()
+
+        execute_color_pick(
+            on_picked=on_color_picked,
+            on_cancel=on_color_pick_cancelled,
         )
 
     def toggle_autostart(self, enabled: bool) -> None:
