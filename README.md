@@ -41,6 +41,15 @@ On first start, SnapAgent creates `.venv`, installs dependencies, and then relau
 python3 run.py
 ```
 
+## Usage
+
+```bash
+git clone https://github.com/joruf/snapagent.git
+cd snapagent
+chmod +x run.py
+./run.py
+```
+
 ## View and Window Reference
 
 This section defines the visible windows and UI element names used in SnapAgent.
@@ -52,6 +61,24 @@ same wording during further implementation.
 The following wireframes provide a visual orientation for where each named element
 is located. They are schematic (not pixel-perfect), but keep naming and positions
 consistent for users and developers.
+
+## Screenshots
+
+### Capture Panel (`SnapAgent Capture`)
+
+![SnapAgent Capture Panel](docs/screenshots/capture-panel.png)
+
+### Window Capture Preview (`Capture Window`)
+
+![SnapAgent Window Capture Preview](docs/screenshots/capture-window-preview.png)
+
+### Editor Window (`SnapAgent Editor`)
+
+![SnapAgent Editor Window](docs/screenshots/editor-window.png)
+
+### System Tray Menu (`SnapAgent`)
+
+![SnapAgent System Tray Menu](docs/screenshots/system-tray-menu.png)
 
 ### Capture Panel Wireframe (`SnapAgent Capture`)
 
