@@ -1227,7 +1227,8 @@ class AppController:
 
         width, height = selected_size
         pixmap = self._build_blank_canvas_pixmap(width, height)
-        self._create_editor_tab(pixmap, f"New Canvas {width}×{height}")
+        editor = self._create_editor_tab(pixmap, f"New Canvas {width}×{height}")
+        editor.canvas.set_blank_document(True)
 
     def _build_blank_canvas_pixmap(self, width: int, height: int):
         """

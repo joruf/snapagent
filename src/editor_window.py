@@ -893,19 +893,20 @@ class EditorWindow(QMainWindow):
         open_action.triggered.connect(self.open_project)
         file_menu.addAction(open_action)
 
-        save_action = QAction("Save Project As...", self)
-        save_action.setShortcut(QKeySequence.StandardKey.SaveAs)
-        save_action.setToolTip("Save project under a new file name.")
-        save_action.triggered.connect(self.save_project_as)
-        file_menu.addAction(save_action)
+        save_as_action = QAction("Save Project As...", self)
+        save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
+        save_as_action.setToolTip("Save project under a new file name.")
+        save_as_action.triggered.connect(self.save_project_as)
+        file_menu.addAction(save_as_action)
 
         save_action = QAction("Save Project", self)
+        save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.setToolTip("Save changes to the current project.")
         save_action.triggered.connect(self.save_project)
         file_menu.addAction(save_action)
 
         export_action = QAction("Export...", self)
-        export_action.setShortcut(QKeySequence.StandardKey.Save)
+        export_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
         export_action.setToolTip("Open export dialog for image or PDF.")
         export_action.triggered.connect(self.export_with_dialog)
         file_menu.addAction(export_action)
@@ -988,6 +989,11 @@ class EditorWindow(QMainWindow):
         edit_menu.addAction(send_to_back_action)
 
         edit_menu.addSeparator()
+
+        import_image_action = QAction("Import Image...", self)
+        import_image_action.setToolTip("Insert an image file into the current document.")
+        import_image_action.triggered.connect(self.import_image)
+        edit_menu.addAction(import_image_action)
 
         paste_action = QAction("Paste", self)
         paste_action.setShortcut(QKeySequence.StandardKey.Paste)
@@ -2005,6 +2011,31 @@ class EditorWindow(QMainWindow):
         self._restore_state(self._history[self._history_index])
         self._update_undo_redo_actions()
 
+    def import_image(self) -> None:
+        """
+        Prompts for one image file and inserts it into the canvas.
+
+        Returns:
+            None
+        """
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.tif *.tiff);;All Files (*)",
+        )
+        if not file_path:
+            return
+        if not self.canvas.import_image_file(file_path):
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Could not import the selected image file.",
+            )
+            return
+        self.statusBar().showMessage("Image imported")
+
     def save_project_as(self) -> None:
         """
         Saves current screenshot project to a SnapAgent file.
@@ -2437,14 +2468,15 @@ class EditorWindow(QMainWindow):
             "2) Annotate with tools in the top bar.\n"
             "3) Save project, export image, or print from File menu.\n\n"
             "Keyboard shortcuts (standard behavior):\n"
-            "Ctrl+S: Export dialog\n"
+            "Ctrl+S: Save project\n"
+            "Ctrl+Shift+E: Export dialog\n"
             "Ctrl+P: Print dialog\n"
             "Ctrl+Shift+S: Save project as\n"
             "Ctrl+O: Open project\n"
             "Ctrl+Z: Undo\n"
             "Ctrl+Y / Ctrl+Shift+Z: Redo\n"
             "Ctrl+C: Copy composited image\n"
-            "Ctrl+V: Paste text/image/image URL\n"
+            "Ctrl+V: Paste text/image/image file/image URL\n"
             "Ctrl + Mouse Wheel: Zoom\n"
             "Enter: Apply crop selection\n"
             "Esc: Cancel crop selection or capture overlays\n\n"
@@ -2465,14 +2497,15 @@ class EditorWindow(QMainWindow):
             self,
             "Keyboard Shortcuts",
             "Editor shortcuts:\n"
-            "Ctrl+S  - Open export dialog (PNG/JPG/PDF)\n"
+            "Ctrl+S  - Save project (.sfp)\n"
+            "Ctrl+Shift+E  - Open export dialog (PNG/JPG/PDF)\n"
             "Ctrl+P  - Open print dialog\n"
             "Ctrl+Shift+S  - Save project as (.sfp)\n"
             "Ctrl+O  - Open project\n"
             "Ctrl+Z  - Undo\n"
             "Ctrl+Y / Ctrl+Shift+Z  - Redo\n"
             "Ctrl+C  - Copy composited image\n"
-            "Ctrl+V  - Paste text/image/image URL\n"
+            "Ctrl+V  - Paste text/image/image file/image URL\n"
             "Ctrl+Mouse Wheel  - Zoom in/out\n"
             "Enter  - Apply crop\n"
             "Esc  - Cancel crop or capture overlay\n",

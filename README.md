@@ -198,7 +198,8 @@ python3 run.py open --project ./example.sfp
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+S` | Export dialog |
+| `Ctrl+S` | Save project |
+| `Ctrl+Shift+E` | Export dialog |
 | `Ctrl+P` | Print |
 | `Ctrl+Shift+S` | Save project as |
 | `Ctrl+O` | Open project |
@@ -206,7 +207,7 @@ python3 run.py open --project ./example.sfp
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
 | `Ctrl+D` | Duplicate selection |
 | `Ctrl+C` | Copy composited image |
-| `Ctrl+V` | Paste text/image/URL |
+| `Ctrl+V` | Paste text/image file/image URL |
 | `Ctrl + Mouse Wheel` | Zoom |
 | `Ctrl++` / `Ctrl+-` | Resize selection ±10% |
 | `Enter` | Apply crop |

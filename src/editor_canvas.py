@@ -5,6 +5,7 @@ Editable screenshot canvas for SnapAgent.
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -19,6 +20,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
     QLineF,
+    QUrl,
 )
 from PySide6.QtGui import (
     QAction,
@@ -87,6 +89,9 @@ _WORKSPACE_MARGIN_MIN = 96.0
 _WORKSPACE_MARGIN_RATIO = 0.15
 _DOCUMENT_SHADOW_OFFSET = 4.0
 _DOCUMENT_MATTE_COLOR = "#ffffff"
+_CLIPBOARD_IMAGE_SUFFIXES = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
+)
 
 
 def decode_base64_to_pixmap(value: str) -> QPixmap:
@@ -223,6 +228,7 @@ class EditorCanvas(QGraphicsView):
         self._next_step_number = 1
         self._alignment_threshold = 8.0
         self._alignment_guides: list[QLineF] = []
+        self._blank_document = False
 
         self._background_item = QGraphicsPixmapItem()
         self._background_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
@@ -231,6 +237,29 @@ class EditorCanvas(QGraphicsView):
         self._scene.addItem(self._background_item)
 
         self._scene.selectionChanged.connect(self._on_selection_changed)
+
+    def set_blank_document(self, enabled: bool) -> None:
+        """
+        Marks the document as an empty canvas awaiting its first pasted image.
+
+        Args:
+            enabled: True when the canvas is blank and should resize on first paste.
+
+        Returns:
+            None
+        """
+
+        self._blank_document = bool(enabled)
+
+    def is_blank_document(self) -> bool:
+        """
+        Returns whether the canvas should adopt pasted image dimensions.
+
+        Returns:
+            bool: True for an unused blank canvas tab.
+        """
+
+        return self._blank_document
 
     def document_rect(self) -> QRectF:
         """
@@ -1396,7 +1425,7 @@ class EditorCanvas(QGraphicsView):
 
     def paste_from_clipboard(self, view_pos: QPoint | None = None) -> None:
         """
-        Pastes text, image, or image URL from clipboard.
+        Pastes text, image, image file, or image URL from clipboard.
 
         Args:
             view_pos: Optional view coordinate for insertion.
@@ -1411,15 +1440,18 @@ class EditorCanvas(QGraphicsView):
             self.mapToScene(view_pos) if view_pos is not None else self.mapToScene(self.viewport().rect().center())
         )
 
-        if mime.hasImage():
-            image = clipboard.image()
-            pixmap = QPixmap.fromImage(image)
-            self._insert_image_pixmap(pixmap, scene_pos)
+        pixmap = self._pixmap_from_clipboard(mime)
+        if pixmap is not None and not pixmap.isNull():
+            self._paste_image_pixmap(pixmap, scene_pos)
             return
 
         if mime.hasText():
             text = mime.text().strip()
             if text.lower().startswith(("http://", "https://")) and self._try_paste_image_url(text, scene_pos):
+                return
+            path_pixmap = self._pixmap_from_local_path_text(text)
+            if path_pixmap is not None and not path_pixmap.isNull():
+                self._paste_image_pixmap(path_pixmap, scene_pos)
                 return
             if text:
                 text_item = self._scene.addText(text)
@@ -1849,23 +1881,230 @@ class EditorCanvas(QGraphicsView):
         self._insert_image_pixmap(QPixmap.fromImage(image), scene_pos)
         return True
 
-    def _insert_image_pixmap(self, pixmap: QPixmap, scene_pos: QPointF) -> None:
+    def import_image_file(self, file_path: str, view_pos: QPoint | None = None) -> bool:
+        """
+        Imports one local image file into the document as a movable annotation.
+
+        Args:
+            file_path: Absolute or relative path to an image file.
+            view_pos: Optional view coordinate for insertion.
+
+        Returns:
+            bool: True when the image was imported successfully.
+        """
+
+        pixmap = self._load_image_pixmap(Path(file_path))
+        if pixmap is None or pixmap.isNull():
+            return False
+        scene_pos = (
+            self.mapToScene(view_pos) if view_pos is not None else self.mapToScene(self.viewport().rect().center())
+        )
+        self._paste_image_pixmap(pixmap, scene_pos)
+        return True
+
+    def _paste_image_pixmap(self, pixmap: QPixmap, scene_pos: QPointF) -> None:
+        """
+        Inserts one image and applies blank-canvas sizing rules when needed.
+
+        Args:
+            pixmap: Image to insert.
+            scene_pos: Target position in scene coordinates.
+
+        Returns:
+            None
+        """
+
+        snap_position = True
+        if self._blank_document and not self.collect_annotations():
+            blank = QPixmap(pixmap.size())
+            blank.fill(QColor(255, 255, 255, 255))
+            self.set_screenshot(blank)
+            self._blank_document = False
+            scene_pos = QPointF(0.0, 0.0)
+            snap_position = False
+        self._insert_image_pixmap(pixmap, scene_pos, snap=snap_position)
+
+    def _pixmap_from_local_path_text(self, text: str) -> QPixmap | None:
+        """
+        Loads an image when clipboard text contains one local file path.
+
+        Args:
+            text: Clipboard text payload.
+
+        Returns:
+            QPixmap | None: Loaded image or None.
+        """
+
+        for path in self._image_paths_from_text(text):
+            pixmap = self._load_image_pixmap(path)
+            if pixmap is not None:
+                return pixmap
+        return None
+
+    def _load_image_pixmap(self, path: Path) -> QPixmap | None:
+        """
+        Loads one supported image file into a pixmap.
+
+        Args:
+            path: Local image file path.
+
+        Returns:
+            QPixmap | None: Loaded pixmap or None.
+        """
+
+        if path.suffix.lower() not in _CLIPBOARD_IMAGE_SUFFIXES or not path.is_file():
+            return None
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            return None
+        return pixmap
+
+    def _normalize_local_image_path(self, value: str) -> Path | None:
+        """
+        Normalizes clipboard path or URI text to one local image path.
+
+        Args:
+            value: Raw clipboard path or URI line.
+
+        Returns:
+            Path | None: Existing local image path or None.
+        """
+
+        candidate = value.strip().strip('"').strip("'")
+        if not candidate or candidate.lower() in {"copy", "cut"}:
+            return None
+        if candidate.startswith("file://"):
+            candidate = QUrl(candidate).toLocalFile().strip()
+        if not candidate:
+            return None
+        path = Path(candidate)
+        if path.suffix.lower() not in _CLIPBOARD_IMAGE_SUFFIXES or not path.is_file():
+            return None
+        return path
+
+    def _image_paths_from_text(self, text: str) -> list[Path]:
+        """
+        Extracts local image file paths from plain clipboard text.
+
+        Args:
+            text: Clipboard text payload.
+
+        Returns:
+            list[Path]: Supported local image paths.
+        """
+
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for line in text.splitlines():
+            normalized = self._normalize_local_image_path(line)
+            if normalized is None:
+                continue
+            key = str(normalized.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(normalized)
+        if not paths:
+            normalized = self._normalize_local_image_path(text)
+            if normalized is not None:
+                paths.append(normalized)
+        return paths
+
+    def _image_paths_from_mime(self, mime) -> list[Path]:
+        """
+        Extracts local image file paths from clipboard MIME payloads.
+
+        Args:
+            mime: Clipboard MIME payload.
+
+        Returns:
+            list[Path]: Supported local image paths.
+        """
+
+        paths: list[Path] = []
+        seen: set[str] = set()
+
+        def append_path(raw_value: str) -> None:
+            normalized = self._normalize_local_image_path(raw_value)
+            if normalized is None:
+                return
+            key = str(normalized.resolve())
+            if key in seen:
+                return
+            seen.add(key)
+            paths.append(normalized)
+
+        if mime.hasUrls():
+            for url in mime.urls():
+                if url.isLocalFile():
+                    append_path(url.toLocalFile())
+
+        for format_name in (
+            "text/uri-list",
+            "x-special/gnome-copied-files",
+            "x-special/mate-copied-files",
+        ):
+            if not mime.hasFormat(format_name):
+                continue
+            raw = bytes(mime.data(format_name)).decode("utf-8", errors="ignore")
+            for line in raw.splitlines():
+                append_path(line)
+
+        if mime.hasText():
+            for path in self._image_paths_from_text(mime.text()):
+                key = str(path.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                paths.append(path)
+
+        return paths
+
+    def _pixmap_from_clipboard(self, mime) -> QPixmap | None:
+        """
+        Resolves one image pixmap from clipboard MIME data.
+
+        Args:
+            mime: Clipboard MIME payload.
+
+        Returns:
+            QPixmap | None: Image pixmap when clipboard contains image data.
+        """
+
+        if mime.hasImage():
+            pixmap = QPixmap.fromImage(mime.image())
+            if not pixmap.isNull():
+                return pixmap
+
+        for path in self._image_paths_from_mime(mime):
+            pixmap = self._load_image_pixmap(path)
+            if pixmap is not None:
+                return pixmap
+
+        return None
+
+    def _insert_image_pixmap(self, pixmap: QPixmap, scene_pos: QPointF, *, snap: bool = True) -> None:
         """
         Inserts a pasted image as movable annotation.
 
         Args:
             pixmap: Pasted pixmap.
             scene_pos: Item position.
+            snap: True to align the insertion point to the active grid.
 
         Returns:
             None
         """
 
+        position = self._snap_point_to_grid(scene_pos) if snap else scene_pos
         item = QGraphicsPixmapItem(pixmap)
-        item.setPos(self._snap_point_to_grid(scene_pos))
+        item.setPos(position)
         configure_graphics_item(item, "image")
         item.setData(2001, encode_pixmap_to_base64(pixmap))
         self._scene.addItem(item)
+        self._scene.clearSelection()
+        item.setSelected(True)
+        self._sync_resize_overlay_with_target(item)
         self._emit_content_changed("Paste image")
 
     def _on_selection_changed(self) -> None:
