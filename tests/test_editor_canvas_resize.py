@@ -370,3 +370,29 @@ class TestEditorCanvasResize(unittest.TestCase):
         changed = canvas.resize_selected_items(1.25)
         self.assertTrue(changed)
 
+    def test_snap_to_grid_moves_selected_item(self) -> None:
+        """
+        Ensures snap-to-grid adjusts selected item position on release.
+        """
+
+        annotation = AnnotationModel(
+            annotation_type="rect",
+            x=13.0,
+            y=19.0,
+            width=40.0,
+            height=20.0,
+            stroke_rgba=[255, 0, 0, 255],
+            fill_rgba=[255, 0, 0, 80],
+            stroke_width=2.0,
+        )
+        canvas, item = self._canvas_with_item(annotation)
+        item.setSelected(True)
+        canvas.set_snap_enabled(True)
+        canvas.set_grid_size(16)
+        item.setPos(13.0, 19.0)
+
+        canvas._snap_selected_items_with_alignment()  # pylint: disable=protected-access
+        snapped_rect = canvas._item_scene_rect(item)  # pylint: disable=protected-access
+        self.assertAlmostEqual(snapped_rect.left() % 16.0, 0.0, places=4)
+        self.assertAlmostEqual(snapped_rect.top() % 16.0, 0.0, places=4)
+

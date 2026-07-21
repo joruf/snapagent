@@ -5,6 +5,7 @@ Main screenshot editing window for SnapAgent.
 from __future__ import annotations
 
 import tempfile
+import os
 from typing import Any
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -51,7 +53,7 @@ from src.constants import (
     APP_NAME,
 )
 from src.editor_canvas import EditorCanvas, Tool
-from src.models import AnnotationModel
+from src.models import AnnotationModel, ProjectModel
 from src.storage import (
     base64_png_to_pixmap,
     build_project_model,
@@ -80,8 +82,10 @@ class EditorWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} Editor")
         self.resize(1400, 900)
         self._current_project_path = ""
-        self._recovery_path = f"{tempfile.gettempdir()}/snapagent-autosave{APP_FILE_EXTENSION}"
+        self._recovery_path = self.recovery_snapshot_path()
         self._minimize_to_tray_on_close = True
+        self._jpeg_quality = 90
+        self._pdf_dpi = 300
 
         self._record_history = True
         self._history: list[dict[str, Any]] = []
@@ -100,6 +104,9 @@ class EditorWindow(QMainWindow):
         self._current_stroke_color = QColor(231, 76, 60, 255)
         self._current_fill_color = QColor(231, 76, 60, 80)
         self._current_text_color = QColor(44, 62, 80, 255)
+        self._text_bold_enabled = False
+        self._text_italic_enabled = False
+        self._text_underline_enabled = False
 
         container = QWidget(self)
         self.setCentralWidget(container)
@@ -342,7 +349,46 @@ class EditorWindow(QMainWindow):
         self.font_size_combo.setCurrentText("16")
         self.font_size_combo.currentTextChanged.connect(self._font_size_changed)
         text_layout.addWidget(self.font_size_combo)
+
+        self.text_bold_button = QToolButton()
+        self.text_bold_button.setText("B")
+        self.text_bold_button.setCheckable(True)
+        self.text_bold_button.clicked.connect(self._text_bold_toggled)
+        text_layout.addWidget(self.text_bold_button)
+
+        self.text_italic_button = QToolButton()
+        self.text_italic_button.setText("I")
+        self.text_italic_button.setCheckable(True)
+        self.text_italic_button.clicked.connect(self._text_italic_toggled)
+        text_layout.addWidget(self.text_italic_button)
+
+        self.text_underline_button = QToolButton()
+        self.text_underline_button.setText("U")
+        self.text_underline_button.setCheckable(True)
+        self.text_underline_button.clicked.connect(self._text_underline_toggled)
+        text_layout.addWidget(self.text_underline_button)
         self._toolbar_groups.append(text_group)
+
+        align_group, align_layout = self._create_toolbar_group("Align & Grid")
+        self.snap_to_grid_button = QToolButton()
+        self.snap_to_grid_button.setText("Snap")
+        self.snap_to_grid_button.setCheckable(True)
+        self.snap_to_grid_button.clicked.connect(self._snap_toggled)
+        align_layout.addWidget(self.snap_to_grid_button)
+
+        self.grid_visible_button = QToolButton()
+        self.grid_visible_button.setText("Grid")
+        self.grid_visible_button.setCheckable(True)
+        self.grid_visible_button.clicked.connect(self._grid_toggled)
+        align_layout.addWidget(self.grid_visible_button)
+
+        align_layout.addWidget(QLabel("Size"))
+        self.grid_size_combo = QComboBox()
+        self.grid_size_combo.addItems(["8", "12", "16", "20", "24", "32", "40", "48"])
+        self.grid_size_combo.setCurrentText("16")
+        self.grid_size_combo.currentTextChanged.connect(self._grid_size_changed)
+        align_layout.addWidget(self.grid_size_combo)
+        self._toolbar_groups.append(align_group)
 
         history_group, history_layout = self._create_toolbar_group("History")
         self.history_undo_button = QPushButton("Undo")
@@ -618,6 +664,12 @@ class EditorWindow(QMainWindow):
         self.text_alpha_slider.setToolTip("Set text opacity.")
         self.font_family_combo.setToolTip("Select text font family.")
         self.font_size_combo.setToolTip("Select text font size.")
+        self.text_bold_button.setToolTip("Toggle bold text style.")
+        self.text_italic_button.setToolTip("Toggle italic text style.")
+        self.text_underline_button.setToolTip("Toggle underline text style.")
+        self.snap_to_grid_button.setToolTip("Snap drawing and movement to grid.")
+        self.grid_visible_button.setToolTip("Show or hide the alignment grid.")
+        self.grid_size_combo.setToolTip("Choose grid spacing in pixels.")
         self.zoom_slider.setToolTip("Adjust zoom level.")
         self.zoom_in_button.setToolTip("Zoom in.")
         self.zoom_out_button.setToolTip("Zoom out.")
@@ -1203,6 +1255,97 @@ class EditorWindow(QMainWindow):
         self.canvas.set_style(font_family=value)
         self._push_history_state()
 
+    def _text_bold_toggled(self, checked: bool) -> None:
+        """
+        Updates active and selected text bold style.
+
+        Args:
+            checked: True when bold is enabled.
+
+        Returns:
+            None
+        """
+
+        self._text_bold_enabled = bool(checked)
+        self._set_next_history_label("Toggle bold text")
+        self.canvas.set_style(font_bold=self._text_bold_enabled)
+        self._push_history_state()
+
+    def _text_italic_toggled(self, checked: bool) -> None:
+        """
+        Updates active and selected text italic style.
+
+        Args:
+            checked: True when italic is enabled.
+
+        Returns:
+            None
+        """
+
+        self._text_italic_enabled = bool(checked)
+        self._set_next_history_label("Toggle italic text")
+        self.canvas.set_style(font_italic=self._text_italic_enabled)
+        self._push_history_state()
+
+    def _text_underline_toggled(self, checked: bool) -> None:
+        """
+        Updates active and selected text underline style.
+
+        Args:
+            checked: True when underline is enabled.
+
+        Returns:
+            None
+        """
+
+        self._text_underline_enabled = bool(checked)
+        self._set_next_history_label("Toggle underline text")
+        self.canvas.set_style(font_underline=self._text_underline_enabled)
+        self._push_history_state()
+
+    def _snap_toggled(self, checked: bool) -> None:
+        """
+        Enables or disables snap-to-grid behavior on the canvas.
+
+        Args:
+            checked: True when snapping is enabled.
+
+        Returns:
+            None
+        """
+
+        self.canvas.set_snap_enabled(bool(checked))
+        self.statusBar().showMessage("Snap enabled" if checked else "Snap disabled")
+
+    def _grid_toggled(self, checked: bool) -> None:
+        """
+        Enables or disables the visible alignment grid overlay.
+
+        Args:
+            checked: True to show the grid.
+
+        Returns:
+            None
+        """
+
+        self.canvas.set_grid_visible(bool(checked))
+        self.statusBar().showMessage("Grid visible" if checked else "Grid hidden")
+
+    def _grid_size_changed(self, value: str) -> None:
+        """
+        Updates the canvas grid spacing.
+
+        Args:
+            value: Selected grid size text.
+
+        Returns:
+            None
+        """
+
+        if not value.isdigit():
+            return
+        self.canvas.set_grid_size(int(value))
+
     def _on_zoom_changed(self, zoom_factor: float) -> None:
         """
         Refreshes zoom status text.
@@ -1332,6 +1475,24 @@ class EditorWindow(QMainWindow):
             self.font_family_combo.blockSignals(True)
             self.font_family_combo.setCurrentText(font_family.strip())
             self.font_family_combo.blockSignals(False)
+        font_bold = payload.get("font_bold")
+        if isinstance(font_bold, bool):
+            self._text_bold_enabled = font_bold
+            self.text_bold_button.blockSignals(True)
+            self.text_bold_button.setChecked(font_bold)
+            self.text_bold_button.blockSignals(False)
+        font_italic = payload.get("font_italic")
+        if isinstance(font_italic, bool):
+            self._text_italic_enabled = font_italic
+            self.text_italic_button.blockSignals(True)
+            self.text_italic_button.setChecked(font_italic)
+            self.text_italic_button.blockSignals(False)
+        font_underline = payload.get("font_underline")
+        if isinstance(font_underline, bool):
+            self._text_underline_enabled = font_underline
+            self.text_underline_button.blockSignals(True)
+            self.text_underline_button.setChecked(font_underline)
+            self.text_underline_button.blockSignals(False)
 
     def _on_crop_state_changed(self, is_active: bool) -> None:
         """
@@ -1578,6 +1739,92 @@ class EditorWindow(QMainWindow):
         self._update_window_title()
         self.statusBar().showMessage("Project loaded")
 
+    @classmethod
+    def recovery_snapshot_path(cls) -> str:
+        """
+        Returns the shared auto-recovery project file path.
+
+        Returns:
+            str: Recovery snapshot path.
+        """
+
+        return f"{tempfile.gettempdir()}/snapagent-autosave{APP_FILE_EXTENSION}"
+
+    @classmethod
+    def has_recovery_snapshot(cls) -> bool:
+        """
+        Indicates whether a recovery snapshot exists and is non-empty.
+
+        Returns:
+            bool: True when recovery snapshot exists.
+        """
+
+        path = cls.recovery_snapshot_path()
+        try:
+            return os.path.isfile(path) and os.path.getsize(path) > 0
+        except OSError:
+            return False
+
+    @classmethod
+    def discard_recovery_snapshot(cls) -> None:
+        """
+        Removes the current recovery snapshot if it exists.
+
+        Returns:
+            None
+        """
+
+        path = cls.recovery_snapshot_path()
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            return
+
+    def load_project_model(
+        self,
+        project_model: ProjectModel,
+        source_path: str = "",
+    ) -> None:
+        """
+        Loads one already parsed project model into the editor.
+
+        Args:
+            project_model: Parsed project model to load.
+            source_path: Optional source file path for title display.
+
+        Returns:
+            None
+        """
+
+        self._record_history = False
+        self.canvas.set_screenshot(base64_png_to_pixmap(project_model.screenshot_png_base64))
+        self.canvas.load_annotations(project_model.annotations)
+        self._record_history = True
+        self._history.clear()
+        self._history_labels.clear()
+        self._history_index = -1
+        self._set_next_history_label("Recovered project" if not source_path else "Open project")
+        self._push_history_state()
+        self._current_project_path = source_path
+        self._update_window_title()
+
+    def load_recovery_snapshot(self) -> bool:
+        """
+        Loads the auto-recovery snapshot into the current editor tab.
+
+        Returns:
+            bool: True when recovery data was loaded.
+        """
+
+        if not self.has_recovery_snapshot():
+            return False
+        recovery_path = self.recovery_snapshot_path()
+        project_model = load_project(recovery_path)
+        self.load_project_model(project_model, "")
+        self.statusBar().showMessage("Recovered auto-saved project")
+        return True
+
     def export_image(self, fmt: str) -> None:
         """
         Exports composited image to PNG/JPG formats.
@@ -1603,7 +1850,14 @@ class EditorWindow(QMainWindow):
         if fmt == "JPG" and not file_path.lower().endswith((".jpg", ".jpeg")):
             file_path = f"{file_path}.jpg"
         pixmap = self.canvas.export_composited_pixmap()
-        pixmap.save(file_path, fmt)
+        if fmt == "JPG":
+            quality = self._ask_jpeg_quality(self._jpeg_quality)
+            if quality is None:
+                return
+            self._jpeg_quality = quality
+            pixmap.save(file_path, fmt, quality)
+        else:
+            pixmap.save(file_path, fmt)
         self.statusBar().showMessage(f"Exported {fmt}")
 
     def export_with_dialog(self) -> None:
@@ -1633,13 +1887,21 @@ class EditorWindow(QMainWindow):
         if "JPEG" in selected_filter:
             if not file_path.lower().endswith((".jpg", ".jpeg")):
                 file_path = f"{file_path}.jpg"
-            self.canvas.export_composited_pixmap().save(file_path, "JPG")
+            quality = self._ask_jpeg_quality(self._jpeg_quality)
+            if quality is None:
+                return
+            self._jpeg_quality = quality
+            self.canvas.export_composited_pixmap().save(file_path, "JPG", quality)
             self.statusBar().showMessage("Exported JPG")
             return
 
         if not file_path.lower().endswith(".pdf"):
             file_path = f"{file_path}.pdf"
-        self._write_pdf_to_path(file_path)
+        dpi = self._ask_pdf_dpi(self._pdf_dpi)
+        if dpi is None:
+            return
+        self._pdf_dpi = dpi
+        self._write_pdf_to_path(file_path, dpi)
         self.statusBar().showMessage("Exported PDF")
 
     def export_pdf(self) -> None:
@@ -1660,15 +1922,20 @@ class EditorWindow(QMainWindow):
             return
         if not file_path.lower().endswith(".pdf"):
             file_path = f"{file_path}.pdf"
-        self._write_pdf_to_path(file_path)
+        dpi = self._ask_pdf_dpi(self._pdf_dpi)
+        if dpi is None:
+            return
+        self._pdf_dpi = dpi
+        self._write_pdf_to_path(file_path, dpi)
         self.statusBar().showMessage("Exported PDF")
 
-    def _write_pdf_to_path(self, file_path: str) -> None:
+    def _write_pdf_to_path(self, file_path: str, dpi: int) -> None:
         """
         Writes current composited image as PDF to target path.
 
         Args:
             file_path: PDF output path.
+            dpi: Export resolution in dots per inch.
 
         Returns:
             None
@@ -1677,7 +1944,7 @@ class EditorWindow(QMainWindow):
         writer = QPdfWriter(file_path)
         writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
         writer.setPageOrientation(QPageLayout.Orientation.Landscape)
-        writer.setResolution(300)
+        writer.setResolution(max(72, min(1200, int(dpi))))
         writer.setColorModel(QPagedPaintDevice.ColorModel.Rgb)
 
         pixmap = self.canvas.export_composited_pixmap()
@@ -1692,6 +1959,54 @@ class EditorWindow(QMainWindow):
         y_offset = int((page_rect.height() - scaled.height()) / 2)
         painter.drawPixmap(x_offset, y_offset, scaled)
         painter.end()
+
+    def _ask_jpeg_quality(self, default: int) -> int | None:
+        """
+        Opens quality input dialog for JPEG exports.
+
+        Args:
+            default: Default quality value from previous export.
+
+        Returns:
+            int | None: Selected quality or None when cancelled.
+        """
+
+        quality, accepted = QInputDialog.getInt(
+            self,
+            "JPEG Quality",
+            "Choose JPEG quality (1-100):",
+            max(1, min(100, int(default))),
+            1,
+            100,
+            1,
+        )
+        if not accepted:
+            return None
+        return quality
+
+    def _ask_pdf_dpi(self, default: int) -> int | None:
+        """
+        Opens resolution input dialog for PDF exports.
+
+        Args:
+            default: Default DPI value from previous export.
+
+        Returns:
+            int | None: Selected DPI or None when cancelled.
+        """
+
+        dpi, accepted = QInputDialog.getInt(
+            self,
+            "PDF DPI",
+            "Choose PDF DPI (72-1200):",
+            max(72, min(1200, int(default))),
+            72,
+            1200,
+            1,
+        )
+        if not accepted:
+            return None
+        return dpi
 
     def print_image(self) -> None:
         """

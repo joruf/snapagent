@@ -16,6 +16,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QImage,
     QKeySequence,
+    QLineF,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -24,6 +25,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsLineItem,
@@ -33,8 +36,10 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
-    QInputDialog,
+    QLabel,
     QMenu,
+    QTextEdit,
+    QVBoxLayout,
 )
 
 from src.annotation_items import (
@@ -136,6 +141,9 @@ class EditorCanvas(QGraphicsView):
             stroke_width=3.0,
             font_size=16,
             font_family="Sans Serif",
+            font_bold=False,
+            font_italic=False,
+            font_underline=False,
         )
         self._zoom_factor = 1.0
         self._initial_view_pending = False
@@ -147,6 +155,11 @@ class EditorCanvas(QGraphicsView):
         self._resize_overlay_item: CropSelectionItem | None = None
         self._resize_overlay_target: QGraphicsItem | None = None
         self._updating_resize_overlay = False
+        self._grid_visible = False
+        self._snap_enabled = False
+        self._grid_size = 16
+        self._alignment_threshold = 8.0
+        self._alignment_guides: list[QLineF] = []
 
         self._background_item = QGraphicsPixmapItem()
         self._background_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
@@ -244,6 +257,8 @@ class EditorCanvas(QGraphicsView):
         self._tool = tool
         QApplication.restoreOverrideCursor()
         self._apply_tool_cursor(tool)
+        self._alignment_guides.clear()
+        self.viewport().update()
         if tool == Tool.SELECT:
             self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
         else:
@@ -304,6 +319,9 @@ class EditorCanvas(QGraphicsView):
         stroke_width: float | None = None,
         font_size: int | None = None,
         font_family: str | None = None,
+        font_bold: bool | None = None,
+        font_italic: bool | None = None,
+        font_underline: bool | None = None,
     ) -> None:
         """
         Updates active style options and selected item style.
@@ -311,8 +329,13 @@ class EditorCanvas(QGraphicsView):
         Args:
             stroke_color: Optional new stroke color.
             fill_color: Optional new fill color.
+            text_color: Optional new text color.
             stroke_width: Optional new stroke width.
             font_size: Optional new font size.
+            font_family: Optional new font family.
+            font_bold: Optional bold state for text.
+            font_italic: Optional italic state for text.
+            font_underline: Optional underline state for text.
 
         Returns:
             None
@@ -330,6 +353,12 @@ class EditorCanvas(QGraphicsView):
             self._style.text_color = text_color
         if font_family is not None and font_family.strip():
             self._style.font_family = font_family.strip()
+        if font_bold is not None:
+            self._style.font_bold = bool(font_bold)
+        if font_italic is not None:
+            self._style.font_italic = bool(font_italic)
+        if font_underline is not None:
+            self._style.font_underline = bool(font_underline)
 
         changed = False
         for item in self._scene.selectedItems():
@@ -370,9 +399,94 @@ class EditorCanvas(QGraphicsView):
                     font = text_item.font()
                     font.setFamily(font_family.strip())
                     text_item.setFont(font)
+                if font_bold is not None:
+                    font = text_item.font()
+                    font.setBold(bool(font_bold))
+                    text_item.setFont(font)
+                if font_italic is not None:
+                    font = text_item.font()
+                    font.setItalic(bool(font_italic))
+                    text_item.setFont(font)
+                if font_underline is not None:
+                    font = text_item.font()
+                    font.setUnderline(bool(font_underline))
+                    text_item.setFont(font)
                 changed = True
         if changed:
             self._emit_content_changed("Update selected style")
+
+    def set_grid_visible(self, visible: bool) -> None:
+        """
+        Enables or disables the optional canvas grid overlay.
+
+        Args:
+            visible: True to display the grid.
+
+        Returns:
+            None
+        """
+
+        self._grid_visible = bool(visible)
+        self.viewport().update()
+
+    def set_snap_enabled(self, enabled: bool) -> None:
+        """
+        Enables or disables snapping for placement and movement.
+
+        Args:
+            enabled: True to enable snapping.
+
+        Returns:
+            None
+        """
+
+        self._snap_enabled = bool(enabled)
+        self._alignment_guides.clear()
+        self.viewport().update()
+
+    def set_grid_size(self, size: int) -> None:
+        """
+        Updates the grid spacing in scene pixels.
+
+        Args:
+            size: Grid step size.
+
+        Returns:
+            None
+        """
+
+        self._grid_size = max(4, min(128, int(size)))
+        self.viewport().update()
+
+    def grid_visible(self) -> bool:
+        """
+        Returns current grid visibility state.
+
+        Returns:
+            bool: True when grid is visible.
+        """
+
+        return self._grid_visible
+
+    def snap_enabled(self) -> bool:
+        """
+        Returns current snapping state.
+
+        Returns:
+            bool: True when snapping is enabled.
+        """
+
+        return self._snap_enabled
+
+    def grid_size(self) -> int:
+        """
+        Returns the current snapping grid size.
+
+        Returns:
+            int: Grid step in pixels.
+        """
+
+        return self._grid_size
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """
@@ -393,16 +507,20 @@ class EditorCanvas(QGraphicsView):
             return
 
         scene_pos = self.mapToScene(event.position().toPoint())
+        scene_pos = self._snap_point_to_grid(scene_pos)
         self._start_scene_pos = scene_pos
 
         if self._tool == Tool.TEXT:
-            text, accepted = QInputDialog.getText(self, "Insert Text", "Text:")
-            if accepted and text:
+            text = self._prompt_text_input()
+            if text:
                 item = self._scene.addText(text)
                 item.setDefaultTextColor(self._style.text_color)
                 font = item.font()
                 font.setPointSize(self._style.font_size)
                 font.setFamily(self._style.font_family)
+                font.setBold(self._style.font_bold)
+                font.setItalic(self._style.font_italic)
+                font.setUnderline(self._style.font_underline)
                 item.setFont(font)
                 item.setPos(scene_pos)
                 item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
@@ -468,6 +586,55 @@ class EditorCanvas(QGraphicsView):
         event.accept()
         return True
 
+    def _prompt_text_input(self) -> str:
+        """
+        Opens a multi-line text input dialog for text annotations.
+
+        Returns:
+            str: Entered text, empty when cancelled.
+        """
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Insert Text")
+        dialog.setModal(True)
+        dialog.resize(420, 240)
+
+        root_layout = QVBoxLayout(dialog)
+        label = QLabel("Text:")
+        root_layout.addWidget(label)
+        text_edit = QTextEdit(dialog)
+        text_edit.setPlaceholderText("Enter one or multiple lines.")
+        root_layout.addWidget(text_edit)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        root_layout.addWidget(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return ""
+        return text_edit.toPlainText().strip()
+
+    def _snap_point_to_grid(self, point: QPointF) -> QPointF:
+        """
+        Snaps one point to grid intersections when snapping is enabled.
+
+        Args:
+            point: Scene-space point.
+
+        Returns:
+            QPointF: Snapped or unchanged point.
+        """
+
+        if not self._snap_enabled:
+            return point
+        grid_size = float(max(1, self._grid_size))
+        snapped_x = round(point.x() / grid_size) * grid_size
+        snapped_y = round(point.y() / grid_size) * grid_size
+        return QPointF(snapped_x, snapped_y)
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """
         Updates the preview item while drawing.
@@ -529,6 +696,8 @@ class EditorCanvas(QGraphicsView):
             self._emit_content_changed(draw_names.get(self._tool, "Draw annotation"))
             return
         super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._snap_selected_items_with_alignment()
         self._sync_resize_overlay_with_target()
 
     def wheelEvent(self, event) -> None:
@@ -712,12 +881,18 @@ class EditorCanvas(QGraphicsView):
 
         if self._preview_item is None:
             return
-        rect = QRectF(start, current).normalized()
+        snapped_current = self._snap_point_to_grid(current)
+        rect = QRectF(start, snapped_current).normalized()
         if isinstance(self._preview_item, (QGraphicsRectItem, QGraphicsEllipseItem)):
             self._preview_item.setRect(rect)
             return
         if isinstance(self._preview_item, QGraphicsLineItem):
-            self._preview_item.setLine(start.x(), start.y(), current.x(), current.y())
+            self._preview_item.setLine(
+                start.x(),
+                start.y(),
+                snapped_current.x(),
+                snapped_current.y(),
+            )
 
     def _apply_crop(self, crop_rect: QRectF) -> None:
         """
@@ -971,6 +1146,9 @@ class EditorCanvas(QGraphicsView):
                 font = text_item.font()
                 font.setPointSize(self._style.font_size)
                 font.setFamily(self._style.font_family)
+                font.setBold(self._style.font_bold)
+                font.setItalic(self._style.font_italic)
+                font.setUnderline(self._style.font_underline)
                 text_item.setFont(font)
                 text_item.setPos(scene_pos)
                 text_item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
@@ -1203,7 +1381,7 @@ class EditorCanvas(QGraphicsView):
         """
 
         item = QGraphicsPixmapItem(pixmap)
-        item.setPos(scene_pos)
+        item.setPos(self._snap_point_to_grid(scene_pos))
         configure_graphics_item(item, "image")
         item.setData(2001, encode_pixmap_to_base64(pixmap))
         self._scene.addItem(item)
@@ -1243,6 +1421,9 @@ class EditorCanvas(QGraphicsView):
             payload["text_rgba"] = color_to_list(item.defaultTextColor())
             payload["font_size"] = item.font().pointSize()
             payload["font_family"] = item.font().family()
+            payload["font_bold"] = item.font().bold()
+            payload["font_italic"] = item.font().italic()
+            payload["font_underline"] = item.font().underline()
         elif annotation_type == "image":
             payload["stroke_width"] = 0.0
         self.selection_style_changed.emit(payload)
@@ -1463,6 +1644,171 @@ class EditorCanvas(QGraphicsView):
             return True
 
         return False
+
+    def _annotation_items(self) -> list[QGraphicsItem]:
+        """
+        Returns all scene items that represent persisted annotations.
+
+        Returns:
+            list[QGraphicsItem]: Annotation graphics items.
+        """
+
+        items: list[QGraphicsItem] = []
+        for item in self._scene.items():
+            if item in {
+                self._background_item,
+                self._crop_item,
+                self._crop_shade_item,
+                self._resize_overlay_item,
+            }:
+                continue
+            if not str(item.data(ITEM_ROLE_TYPE) or ""):
+                continue
+            items.append(item)
+        return items
+
+    def _snap_selected_items_with_alignment(self) -> None:
+        """
+        Snaps selected annotations to grid and nearby item alignment.
+
+        Returns:
+            None
+        """
+
+        if not self._snap_enabled:
+            self._alignment_guides.clear()
+            self.viewport().update()
+            return
+
+        selected = [
+            item
+            for item in self._scene.selectedItems()
+            if item not in {self._background_item, self._crop_item, self._crop_shade_item, self._resize_overlay_item}
+        ]
+        if not selected:
+            self._alignment_guides.clear()
+            self.viewport().update()
+            return
+
+        anchor = selected[0]
+        anchor_rect = self._item_scene_rect(anchor)
+
+        grid_anchor = self._snap_point_to_grid(anchor_rect.topLeft())
+        grid_dx = grid_anchor.x() - anchor_rect.x()
+        grid_dy = grid_anchor.y() - anchor_rect.y()
+
+        align_dx, align_dy, guides = self._compute_alignment_shift(anchor, anchor_rect)
+        shift_x = align_dx if align_dx is not None else grid_dx
+        shift_y = align_dy if align_dy is not None else grid_dy
+        if abs(shift_x) < 0.001 and abs(shift_y) < 0.001:
+            self._alignment_guides = guides
+            self.viewport().update()
+            return
+
+        for item in selected:
+            item.setPos(item.pos() + QPointF(shift_x, shift_y))
+        self._sync_resize_overlay_with_target()
+        self._alignment_guides = guides
+        self.viewport().update()
+        self._emit_content_changed("Snap selection")
+
+    def _compute_alignment_shift(
+        self,
+        anchor: QGraphicsItem,
+        anchor_rect: QRectF,
+    ) -> tuple[float | None, float | None, list[QLineF]]:
+        """
+        Calculates magnetic alignment offsets against nearby annotations.
+
+        Args:
+            anchor: Currently moved anchor item.
+            anchor_rect: Anchor geometry in scene coordinates.
+
+        Returns:
+            tuple[float | None, float | None, list[QLineF]]: Best X/Y offset and guide lines.
+        """
+
+        candidates = [item for item in self._annotation_items() if item is not anchor]
+        if not candidates:
+            return None, None, []
+
+        x_points = [
+            anchor_rect.left(),
+            anchor_rect.center().x(),
+            anchor_rect.right(),
+        ]
+        y_points = [
+            anchor_rect.top(),
+            anchor_rect.center().y(),
+            anchor_rect.bottom(),
+        ]
+
+        best_dx: float | None = None
+        best_dy: float | None = None
+        guides: list[QLineF] = []
+
+        for candidate in candidates:
+            rect = self._item_scene_rect(candidate)
+            compare_x = [rect.left(), rect.center().x(), rect.right()]
+            compare_y = [rect.top(), rect.center().y(), rect.bottom()]
+
+            for source_x in x_points:
+                for target_x in compare_x:
+                    delta = target_x - source_x
+                    if abs(delta) > self._alignment_threshold:
+                        continue
+                    if best_dx is None or abs(delta) < abs(best_dx):
+                        best_dx = delta
+                        guides = [line for line in guides if line.p1().x() != line.p2().x()]
+                        guides.append(QLineF(target_x, rect.top(), target_x, rect.bottom()))
+
+            for source_y in y_points:
+                for target_y in compare_y:
+                    delta = target_y - source_y
+                    if abs(delta) > self._alignment_threshold:
+                        continue
+                    if best_dy is None or abs(delta) < abs(best_dy):
+                        best_dy = delta
+                        guides = [line for line in guides if line.p1().y() != line.p2().y()]
+                        guides.append(QLineF(rect.left(), target_y, rect.right(), target_y))
+
+        return best_dx, best_dy, guides
+
+    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+        """
+        Draws optional grid and alignment guides on top of scene items.
+
+        Args:
+            painter: Qt painter.
+            rect: Visible scene rectangle.
+
+        Returns:
+            None
+        """
+
+        super().drawForeground(painter, rect)
+        if self._grid_visible:
+            grid_pen = QPen(QColor(255, 255, 255, 30), 0)
+            painter.setPen(grid_pen)
+            size = max(4, self._grid_size)
+            start_x = int(rect.left() // size) * size
+            end_x = int(rect.right()) + size
+            start_y = int(rect.top() // size) * size
+            end_y = int(rect.bottom()) + size
+            x = start_x
+            while x <= end_x:
+                painter.drawLine(QPointF(float(x), rect.top()), QPointF(float(x), rect.bottom()))
+                x += size
+            y = start_y
+            while y <= end_y:
+                painter.drawLine(QPointF(rect.left(), float(y)), QPointF(rect.right(), float(y)))
+                y += size
+
+        if self._alignment_guides:
+            guide_pen = QPen(QColor(78, 205, 196, 200), 1.2, Qt.PenStyle.DashLine)
+            painter.setPen(guide_pen)
+            for line in self._alignment_guides:
+                painter.drawLine(line)
 
     def _ensure_crop_shade_item(self) -> None:
         """

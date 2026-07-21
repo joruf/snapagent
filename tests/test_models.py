@@ -37,6 +37,9 @@ class TestAnnotationModel(unittest.TestCase):
 
         payload = model.to_dict()
         self.assertEqual(payload["font_family"], "DejaVu Sans")
+        self.assertFalse(payload["font_bold"])
+        self.assertFalse(payload["font_italic"])
+        self.assertFalse(payload["font_underline"])
         self.assertEqual(payload["font_size"], 18)
         self.assertEqual(payload["text"], "hello")
 
@@ -51,6 +54,9 @@ class TestAnnotationModel(unittest.TestCase):
         self.assertEqual(model.fill_rgba, [255, 0, 0, 70])
         self.assertEqual(model.font_size, 16)
         self.assertEqual(model.font_family, "")
+        self.assertFalse(model.font_bold)
+        self.assertFalse(model.font_italic)
+        self.assertFalse(model.font_underline)
 
 
 class TestProjectModel(unittest.TestCase):

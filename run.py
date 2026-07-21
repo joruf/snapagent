@@ -447,6 +447,79 @@ class AppController:
         self.app.setWindowIcon(self.capture_panel.windowIcon())
         self.app.setDesktopFileName("snapagent")
         self.capture_panel.show()
+        self._maybe_restore_recovery_snapshot()
+
+    def _create_editor_tab(self, screenshot, title: str) -> "EditorWindow":
+        """
+        Creates one editor tab for a screenshot and focuses editor host.
+
+        Args:
+            screenshot: Screenshot pixmap for the new tab.
+            title: Tab title text.
+
+        Returns:
+            EditorWindow: Created editor instance.
+        """
+
+        from src.editor_window import EditorWindow
+
+        editor = EditorWindow(screenshot)
+        editor.setWindowIcon(self.editor_host.windowIcon())
+        editor.set_minimize_to_tray_on_close(False)
+        editor.setParent(self.editor_tabs)
+        tab_index = self.editor_tabs.addTab(editor, title)
+        self.editor_tabs.setCurrentIndex(tab_index)
+        self.app.setWindowIcon(self.editor_host.windowIcon())
+        self.app.setDesktopFileName("snapagent-editor")
+        self._ensure_editor_host_geometry()
+        self.editor_host.show()
+        self.editor_host.raise_()
+        self.editor_host.activateWindow()
+        editor.show()
+        editor.destroyed.connect(lambda *_: self._on_editor_closed(editor))
+        self.editors.append(editor)
+        return editor
+
+    def _maybe_restore_recovery_snapshot(self) -> None:
+        """
+        Prompts for restoring auto-saved recovery data at startup.
+
+        Returns:
+            None
+        """
+
+        from src.editor_window import EditorWindow
+
+        if not EditorWindow.has_recovery_snapshot():
+            return
+
+        answer = self._QMessageBox.question(
+            self.capture_panel,
+            "Recovery",
+            "An auto-saved snapshot was found. Restore it now?",
+            self._QMessageBox.StandardButton.Yes | self._QMessageBox.StandardButton.No,
+            self._QMessageBox.StandardButton.Yes,
+        )
+        if answer != self._QMessageBox.StandardButton.Yes:
+            EditorWindow.discard_recovery_snapshot()
+            return
+
+        from src.storage import load_project, base64_png_to_pixmap
+
+        recovery_path = EditorWindow.recovery_snapshot_path()
+        try:
+            recovered_model = load_project(recovery_path)
+        except Exception as exc:
+            self._QMessageBox.warning(
+                self.capture_panel,
+                "Recovery",
+                f"Recovery snapshot could not be loaded:\n{exc}",
+            )
+            return
+
+        screenshot = base64_png_to_pixmap(recovered_model.screenshot_png_base64)
+        editor = self._create_editor_tab(screenshot, "Recovered Session")
+        editor.load_project_model(recovered_model, "")
 
     def start_capture(self, request: CaptureRequest) -> None:
         """
@@ -460,7 +533,6 @@ class AppController:
         """
 
         from src.capture import execute_capture_request
-        from src.editor_window import EditorWindow
 
         self.capture_panel.hide()
 
@@ -474,24 +546,10 @@ class AppController:
                 self.capture_panel.show()
                 return
 
-            editor = EditorWindow(pixmap)
-            editor.setWindowIcon(self.editor_host.windowIcon())
-            editor.set_minimize_to_tray_on_close(False)
-            editor.setParent(self.editor_tabs)
-            tab_index = self.editor_tabs.addTab(
-                editor,
+            self._create_editor_tab(
+                pixmap,
                 f"Screenshot {self.editor_tabs.count() + 1}",
             )
-            self.editor_tabs.setCurrentIndex(tab_index)
-            self.app.setWindowIcon(self.editor_host.windowIcon())
-            self.app.setDesktopFileName("snapagent-editor")
-            self._ensure_editor_host_geometry()
-            self.editor_host.show()
-            self.editor_host.raise_()
-            self.editor_host.activateWindow()
-            editor.show()
-            editor.destroyed.connect(lambda *_: self._on_editor_closed(editor))
-            self.editors.append(editor)
             self.capture_panel.show()
 
         def on_capture_cancelled() -> None:
@@ -582,20 +640,11 @@ class AppController:
 
         if self.editor_tabs.count() == 0:
             from PySide6.QtGui import QColor, QPixmap
-            from src.editor_window import EditorWindow
 
             blank_pixmap = QPixmap(1280, 720)
             blank_pixmap.fill(QColor(255, 255, 255, 255))
-
-            editor = EditorWindow(blank_pixmap)
-            editor.setWindowIcon(self.editor_host.windowIcon())
-            editor.set_minimize_to_tray_on_close(False)
-            editor.setParent(self.editor_tabs)
-            tab_index = self.editor_tabs.addTab(editor, "New Canvas")
-            self.editor_tabs.setCurrentIndex(tab_index)
-            editor.show()
-            editor.destroyed.connect(lambda *_: self._on_editor_closed(editor))
-            self.editors.append(editor)
+            self._create_editor_tab(blank_pixmap, "New Canvas")
+            return
         self.app.setWindowIcon(self.editor_host.windowIcon())
         self.app.setDesktopFileName("snapagent-editor")
         self._ensure_editor_host_geometry()

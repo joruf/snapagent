@@ -26,6 +26,10 @@ class AnnotationModel:
         stroke_width: Stroke thickness in pixels.
         text: Text content for text annotations.
         font_size: Font size in points for text annotations.
+        font_family: Font family name for text annotations.
+        font_bold: Bold state for text annotations.
+        font_italic: Italic state for text annotations.
+        font_underline: Underline state for text annotations.
         payload: Extra type-specific data for forward compatibility.
     """
 
@@ -40,6 +44,9 @@ class AnnotationModel:
     text: str = ""
     font_size: int = 16
     font_family: str = ""
+    font_bold: bool = False
+    font_italic: bool = False
+    font_underline: bool = False
     payload: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -62,6 +69,9 @@ class AnnotationModel:
             "text": self.text,
             "font_size": self.font_size,
             "font_family": self.font_family,
+            "font_bold": self.font_bold,
+            "font_italic": self.font_italic,
+            "font_underline": self.font_underline,
             "payload": self.payload,
         }
 
@@ -89,6 +99,9 @@ class AnnotationModel:
             text=str(data.get("text", "")),
             font_size=int(data.get("font_size", 16)),
             font_family=str(data.get("font_family", "")),
+            font_bold=bool(data.get("font_bold", False)),
+            font_italic=bool(data.get("font_italic", False)),
+            font_underline=bool(data.get("font_underline", False)),
             payload=dict(data.get("payload", {})),
         )
 

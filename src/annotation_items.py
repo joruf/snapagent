@@ -38,6 +38,9 @@ class StyleState:
         stroke_width: Pen thickness.
         font_size: Font size for text annotations.
         font_family: Font family for text annotations.
+        font_bold: Bold style for text annotations.
+        font_italic: Italic style for text annotations.
+        font_underline: Underline style for text annotations.
     """
 
     stroke_color: QColor
@@ -46,6 +49,9 @@ class StyleState:
     stroke_width: float
     font_size: int
     font_family: str
+    font_bold: bool
+    font_italic: bool
+    font_underline: bool
 
 
 class ArrowItem(QGraphicsLineItem):
@@ -221,6 +227,9 @@ def annotation_from_item(item: QGraphicsItem) -> AnnotationModel | None:
             text=text_item.toPlainText(),
             font_size=text_item.font().pointSize(),
             font_family=text_item.font().family(),
+            font_bold=text_item.font().bold(),
+            font_italic=text_item.font().italic(),
+            font_underline=text_item.font().underline(),
         )
 
     if annotation_type == "image":
@@ -296,6 +305,9 @@ def add_annotation_to_scene(
         font.setPointSize(annotation.font_size)
         if annotation.font_family:
             font.setFamily(annotation.font_family)
+        font.setBold(annotation.font_bold)
+        font.setItalic(annotation.font_italic)
+        font.setUnderline(annotation.font_underline)
         item.setFont(font)
         item.setDefaultTextColor(stroke)
         item.setPos(annotation.x, annotation.y)

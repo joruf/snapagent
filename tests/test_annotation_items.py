@@ -90,6 +90,9 @@ class TestAnnotationItems(unittest.TestCase):
             stroke_width=5.0,
             font_size=16,
             font_family="Sans Serif",
+            font_bold=False,
+            font_italic=False,
+            font_underline=False,
         )
         pen = create_pen(style)
         self.assertEqual(pen.widthF(), 5.0)
@@ -117,6 +120,9 @@ class TestAnnotationItems(unittest.TestCase):
         font = QFont(text_item.font())
         font.setPointSize(21)
         font.setFamily("DejaVu Sans")
+        font.setBold(True)
+        font.setItalic(True)
+        font.setUnderline(True)
         text_item.setFont(font)
         text_item.setDefaultTextColor(QColor(7, 8, 9, 255))
         text_item.setPos(4.0, 6.0)
@@ -129,6 +135,9 @@ class TestAnnotationItems(unittest.TestCase):
         self.assertEqual(annotation.text, "hello")
         self.assertEqual(annotation.font_size, 21)
         self.assertEqual(annotation.font_family, "DejaVu Sans")
+        self.assertTrue(annotation.font_bold)
+        self.assertTrue(annotation.font_italic)
+        self.assertTrue(annotation.font_underline)
         self.assertEqual(annotation.stroke_rgba, [7, 8, 9, 255])
 
     def test_add_annotation_to_scene_creates_text_with_font_family(self) -> None:
