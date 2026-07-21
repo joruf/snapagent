@@ -1,0 +1,4 @@
+"""
+SnapAgent package.
+"""
+
