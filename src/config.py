@@ -8,6 +8,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.theme import DEFAULT_THEME, normalize_theme_name
+
 
 @dataclass(slots=True)
 class AppConfig:
@@ -16,9 +18,11 @@ class AppConfig:
 
     Attributes:
         autostart_enabled: Whether app launches at desktop login.
+        theme: Active UI theme identifier (light or dark).
     """
 
     autostart_enabled: bool = False
+    theme: str = DEFAULT_THEME
 
 
 class ConfigManager:
@@ -50,7 +54,10 @@ class ConfigManager:
             payload = json.loads(self.config_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return AppConfig()
-        return AppConfig(autostart_enabled=bool(payload.get("autostart_enabled", False)))
+        return AppConfig(
+            autostart_enabled=bool(payload.get("autostart_enabled", False)),
+            theme=normalize_theme_name(str(payload.get("theme", DEFAULT_THEME))),
+        )
 
     def save(self, config: AppConfig) -> None:
         """
@@ -64,7 +71,10 @@ class ConfigManager:
         """
 
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"autostart_enabled": config.autostart_enabled}
+        payload = {
+            "autostart_enabled": config.autostart_enabled,
+            "theme": normalize_theme_name(config.theme),
+        }
         self.config_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=True),
             encoding="utf-8",

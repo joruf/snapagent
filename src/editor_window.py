@@ -11,6 +11,7 @@ from typing import Any
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QBrush,
     QColor,
     QFontDatabase,
@@ -62,6 +63,13 @@ from src.storage import (
     pixmap_to_base64_png,
     save_project,
 )
+from src.theme import (
+    THEME_DARK,
+    THEME_LIGHT,
+    color_preview_button_stylesheet,
+    normalize_theme_name,
+    palette_button_stylesheet,
+)
 
 
 class EditorWindow(QMainWindow):
@@ -70,6 +78,7 @@ class EditorWindow(QMainWindow):
     """
 
     close_requested = Signal()
+    theme_changed = Signal(str)
 
     def __init__(self, screenshot: QPixmap) -> None:
         """
@@ -95,6 +104,7 @@ class EditorWindow(QMainWindow):
         self._pending_history_label: str | None = None
         self._syncing_history_list = False
         self._toolbar_groups: list[QWidget] = []
+        self._palette_buttons: list[QPushButton] = []
         self._active_tool = Tool.SELECT
         self._locked_tool: str | None = None
         self._one_shot_tool: str | None = None
@@ -131,17 +141,6 @@ class EditorWindow(QMainWindow):
         self._build_menu()
         self._push_history_state()
         self._autosave_timer = self.startTimer(30_000)
-        self.setStyleSheet(
-            "QMainWindow { background: #1f2430; color: #e7ecf2; }"
-            "QMenuBar, QMenu, QStatusBar { background: #232938; color: #e7ecf2; }"
-            "QToolButton, QPushButton { background: #2f3543; color: #e7ecf2; border: 1px solid #434d63; border-radius: 4px; padding: 4px 8px; }"
-            "QToolButton:checked { background: #2f7dd1; border: 1px solid #2f7dd1; color: white; }"
-            "QPushButton:hover, QToolButton:hover { background: #3a4357; }"
-            "QSpinBox, QComboBox { background: #2f3543; color: #e7ecf2; border: 1px solid #434d63; border-radius: 4px; padding: 3px; }"
-            "QComboBox QAbstractItemView { background: #2a3040; color: #ffffff; selection-background-color: #2f7dd1; selection-color: #ffffff; border: 1px solid #434d63; }"
-            "QFrame[toolbarGroup=\"true\"] { border: 1px solid #3b4559; border-radius: 6px; background: #222938; }"
-            "QFrame[toolbarGroup=\"true\"] QLabel { color: #ffffff; }"
-        )
 
     def _build_toolbar(self) -> QWidget:
         """
@@ -242,7 +241,7 @@ class EditorWindow(QMainWindow):
         colors_main_layout.setContentsMargins(6, 4, 6, 4)
         colors_main_layout.setSpacing(4)
         colors_title = QLabel("Color Palette")
-        colors_title.setStyleSheet("font-size: 11px; color: #9fb2c9;")
+        colors_title.setObjectName("mutedLabel")
         colors_main_layout.addWidget(colors_title)
 
         colors_layout = QVBoxLayout()
@@ -594,7 +593,7 @@ class EditorWindow(QMainWindow):
         group_layout.setSpacing(4)
 
         title_label = QLabel(title)
-        title_label.setStyleSheet("font-size: 11px; color: #9fb2c9;")
+        title_label.setObjectName("mutedLabel")
         group_layout.addWidget(title_label)
 
         content_layout = QHBoxLayout()
@@ -618,20 +617,15 @@ class EditorWindow(QMainWindow):
         button = QPushButton("")
         button.setFixedSize(18, 18)
         button.setToolTip(f"Apply {color.name()} to {target}")
-        button.setStyleSheet(
-            "QPushButton {"
-            f"background: {color.name(QColor.NameFormat.HexArgb)};"
-            "border: 1px solid #59657c;"
-            "border-radius: 3px;"
-            "padding: 0px;"
-            "}"
-        )
+        button.setProperty("paletteColor", color.name(QColor.NameFormat.HexArgb))
+        button.setStyleSheet(palette_button_stylesheet(color))
         button.clicked.connect(
             lambda _checked=False, t=target, c=QColor(color): self._apply_palette_color(
                 target=t,
                 color=c,
             )
         )
+        self._palette_buttons.append(button)
         return button
 
     def _apply_toolbar_tooltips(self) -> None:
@@ -691,6 +685,7 @@ class EditorWindow(QMainWindow):
         menu = self.menuBar()
         file_menu = menu.addMenu("File")
         edit_menu = menu.addMenu("Edit")
+        view_menu = menu.addMenu("View")
         help_menu = menu.addMenu("Help")
 
         open_action = QAction("Open Project...", self)
@@ -776,6 +771,26 @@ class EditorWindow(QMainWindow):
         copy_image_action.setToolTip("Copy current composited image to clipboard.")
         copy_image_action.triggered.connect(self.copy_current_image_to_clipboard)
         edit_menu.addAction(copy_image_action)
+
+        theme_menu = view_menu.addMenu("Theme")
+        self._theme_action_group = QActionGroup(self)
+        self._theme_action_group.setExclusive(True)
+        self.theme_dark_action = QAction("Dark", self)
+        self.theme_dark_action.setCheckable(True)
+        self.theme_dark_action.setToolTip("Use the dark application theme.")
+        self.theme_dark_action.triggered.connect(
+            lambda: self.theme_changed.emit(THEME_DARK)
+        )
+        self._theme_action_group.addAction(self.theme_dark_action)
+        theme_menu.addAction(self.theme_dark_action)
+        self.theme_light_action = QAction("Light", self)
+        self.theme_light_action.setCheckable(True)
+        self.theme_light_action.setToolTip("Use the light application theme.")
+        self.theme_light_action.triggered.connect(
+            lambda: self.theme_changed.emit(THEME_LIGHT)
+        )
+        self._theme_action_group.addAction(self.theme_light_action)
+        theme_menu.addAction(self.theme_light_action)
 
         about_action = QAction("About", self)
         about_action.setToolTip("Show application information.")
@@ -1100,15 +1115,42 @@ class EditorWindow(QMainWindow):
             None
         """
 
-        button.setStyleSheet(
-            "QPushButton {"
-            f"background: {color.name(QColor.NameFormat.HexArgb)};"
-            "color: #e7ecf2;"
-            "border: 1px solid #434d63;"
-            "border-radius: 4px;"
-            "padding: 4px 8px;"
-            "}"
-        )
+        button.setStyleSheet(color_preview_button_stylesheet(color))
+
+    def set_theme_selection(self, theme_name: str) -> None:
+        """
+        Updates theme menu actions without emitting change signal.
+
+        Args:
+            theme_name: Theme identifier to select.
+
+        Returns:
+            None
+        """
+
+        normalized = normalize_theme_name(theme_name)
+        self.theme_dark_action.blockSignals(True)
+        self.theme_light_action.blockSignals(True)
+        self.theme_dark_action.setChecked(normalized == THEME_DARK)
+        self.theme_light_action.setChecked(normalized == THEME_LIGHT)
+        self.theme_dark_action.blockSignals(False)
+        self.theme_light_action.blockSignals(False)
+
+    def refresh_theme_styles(self) -> None:
+        """
+        Refreshes widget styles that depend on the active theme.
+
+        Returns:
+            None
+        """
+
+        for button in self._palette_buttons:
+            color_value = button.property("paletteColor")
+            if isinstance(color_value, str) and color_value:
+                button.setStyleSheet(palette_button_stylesheet(QColor(color_value)))
+        self._update_color_button_preview(self.stroke_button, self._current_stroke_color)
+        self._update_color_button_preview(self.fill_button, self._current_fill_color)
+        self._update_color_button_preview(self.text_color_button, self._current_text_color)
 
     def _stroke_width_changed(self, value: int) -> None:
         """

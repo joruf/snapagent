@@ -110,15 +110,8 @@ class CapturePanel(QWidget):
         root_layout.setSpacing(6)
 
         title = QLabel(APP_NAME)
-        title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        title.setObjectName("titleLabel")
         root_layout.addWidget(title)
-        self.setStyleSheet(
-            "QWidget { background: #242833; color: #e7ecf2; }"
-            "QPushButton { background: #2f7dd1; color: #ffffff; border: none; padding: 6px 10px; border-radius: 4px; }"
-            "QPushButton:hover { background: #4591e4; }"
-            "QComboBox, QSpinBox { background: #2f3543; border: 1px solid #3e4657; padding: 3px; border-radius: 4px; }"
-            "QFrame { border: 1px solid #3e4657; border-radius: 5px; }"
-        )
 
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
@@ -141,12 +134,9 @@ class CapturePanel(QWidget):
         self._autostart_enabled = False
 
         self.open_editor_button = QPushButton("Open Editor")
+        self.open_editor_button.setObjectName("linkButton")
         self.open_editor_button.setFlat(True)
         self.open_editor_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.open_editor_button.setStyleSheet(
-            "QPushButton { color: #78b8ff; text-decoration: underline; background: transparent; border: none; padding: 2px 4px; }"
-            "QPushButton:hover { color: #a9d1ff; }"
-        )
         self.open_editor_button.setToolTip(
             "Open the editor window with your existing tabs."
         )
@@ -160,6 +150,7 @@ class CapturePanel(QWidget):
 
         buttons = QHBoxLayout()
         self.capture_fullscreen_button = QPushButton("Capture Fullscreen")
+        self.capture_fullscreen_button.setObjectName("primaryButton")
         self.capture_fullscreen_button.clicked.connect(
             lambda: self._emit_request_for_mode(CaptureMode.FULL_SCREEN)
         )
@@ -167,6 +158,7 @@ class CapturePanel(QWidget):
         buttons.addWidget(self.capture_fullscreen_button)
 
         self.capture_area_button = QPushButton("Capture Area")
+        self.capture_area_button.setObjectName("primaryButton")
         self.capture_area_button.clicked.connect(
             lambda: self._emit_request_for_mode(CaptureMode.REGION)
         )
@@ -174,6 +166,7 @@ class CapturePanel(QWidget):
         buttons.addWidget(self.capture_area_button)
 
         self.capture_window_button = QPushButton("Capture Window")
+        self.capture_window_button.setObjectName("primaryButton")
         self.capture_window_button.clicked.connect(
             lambda: self._emit_request_for_mode(CaptureMode.WINDOW)
         )

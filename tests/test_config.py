@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from src.config import AppConfig, ConfigManager
+from src.theme import THEME_LIGHT
 
 
 class TestConfigManager(unittest.TestCase):
@@ -26,6 +27,7 @@ class TestConfigManager(unittest.TestCase):
             manager = ConfigManager(config_path)
             config = manager.load()
             self.assertFalse(config.autostart_enabled)
+            self.assertEqual(config.theme, "dark")
 
     def test_load_returns_defaults_for_invalid_json(self) -> None:
         """
@@ -38,6 +40,7 @@ class TestConfigManager(unittest.TestCase):
             manager = ConfigManager(config_path)
             config = manager.load()
             self.assertFalse(config.autostart_enabled)
+            self.assertEqual(config.theme, "dark")
 
     def test_save_and_load_roundtrip(self) -> None:
         """
@@ -47,8 +50,9 @@ class TestConfigManager(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / "nested" / "config.json"
             manager = ConfigManager(config_path)
-            manager.save(AppConfig(autostart_enabled=True))
+            manager.save(AppConfig(autostart_enabled=True, theme=THEME_LIGHT))
 
             restored = manager.load()
             self.assertTrue(restored.autostart_enabled)
+            self.assertEqual(restored.theme, THEME_LIGHT)
 

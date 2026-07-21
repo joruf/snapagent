@@ -14,6 +14,13 @@ from typing import TYPE_CHECKING
 from src.autostart import AutostartManager
 from src.config import AppConfig, ConfigManager
 from src.constants import ABOUT_GITHUB, APP_NAME
+from src.theme import (
+    THEME_DARK,
+    THEME_LIGHT,
+    build_application_stylesheet,
+    normalize_theme_name,
+    set_current_theme,
+)
 
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QApplication
@@ -351,7 +358,7 @@ class AppController:
         """
 
         from PySide6.QtCore import Qt, Signal
-        from PySide6.QtGui import QAction
+        from PySide6.QtGui import QAction, QActionGroup
         from PySide6.QtWidgets import QMainWindow, QMenu, QMessageBox, QSystemTrayIcon, QTabWidget
         from src.capture import CapturePanel
 
@@ -423,6 +430,23 @@ class AppController:
             self.autostart_tray_action.setChecked(self.config.autostart_enabled)
             self.autostart_tray_action.toggled.connect(self.toggle_autostart)
             tray_menu.addAction(self.autostart_tray_action)
+            theme_menu = tray_menu.addMenu("Theme")
+            self._theme_action_group = QActionGroup(tray_menu)
+            self._theme_action_group.setExclusive(True)
+            self.theme_dark_action = QAction("Dark", theme_menu)
+            self.theme_dark_action.setCheckable(True)
+            self.theme_dark_action.triggered.connect(
+                lambda: self.set_theme(THEME_DARK)
+            )
+            self._theme_action_group.addAction(self.theme_dark_action)
+            theme_menu.addAction(self.theme_dark_action)
+            self.theme_light_action = QAction("Light", theme_menu)
+            self.theme_light_action.setCheckable(True)
+            self.theme_light_action.triggered.connect(
+                lambda: self.set_theme(THEME_LIGHT)
+            )
+            self._theme_action_group.addAction(self.theme_light_action)
+            theme_menu.addAction(self.theme_light_action)
             tray_menu.addSeparator()
             about_action = QAction("About", tray_menu)
             about_action.triggered.connect(self.show_about_dialog)
@@ -436,6 +460,94 @@ class AppController:
         else:
             self.capture_panel.set_minimize_to_tray_on_close(False)
             self.editor_host.set_minimize_to_tray_on_close(False)
+            self._theme_action_group = None
+            self.theme_dark_action = None
+            self.theme_light_action = None
+
+        self._apply_theme(self.config.theme, persist=False)
+
+    def _sync_theme_tray_actions(self, theme_name: str) -> None:
+        """
+        Updates tray theme action checked states.
+
+        Args:
+            theme_name: Active theme identifier.
+
+        Returns:
+            None
+        """
+
+        if not self._tray_available:
+            return
+        if self.theme_dark_action is None or self.theme_light_action is None:
+            return
+        normalized = normalize_theme_name(theme_name)
+        self.theme_dark_action.blockSignals(True)
+        self.theme_light_action.blockSignals(True)
+        self.theme_dark_action.setChecked(normalized == THEME_DARK)
+        self.theme_light_action.setChecked(normalized == THEME_LIGHT)
+        self.theme_dark_action.blockSignals(False)
+        self.theme_light_action.blockSignals(False)
+
+    def _sync_editor_theme_actions(self, theme_name: str) -> None:
+        """
+        Updates theme menu actions on all open editor tabs.
+
+        Args:
+            theme_name: Active theme identifier.
+
+        Returns:
+            None
+        """
+
+        for editor in list(self.editors):
+            try:
+                editor.set_theme_selection(theme_name)
+            except RuntimeError:
+                continue
+
+    def _apply_theme(self, theme_name: str, *, persist: bool = True) -> None:
+        """
+        Applies one UI theme across the application.
+
+        Args:
+            theme_name: Theme identifier to activate.
+            persist: Whether to save the theme to user config.
+
+        Returns:
+            None
+        """
+
+        normalized = normalize_theme_name(theme_name)
+        set_current_theme(normalized)
+        self.app.setStyleSheet(build_application_stylesheet(normalized))
+        self.config.theme = normalized
+        if persist:
+            self.config_manager.save(self.config)
+        self._sync_editor_theme_actions(normalized)
+        self._sync_theme_tray_actions(normalized)
+        for editor in list(self.editors):
+            try:
+                editor.refresh_theme_styles()
+            except RuntimeError:
+                continue
+
+    def set_theme(self, theme_name: str) -> None:
+        """
+        Switches the active UI theme and persists the choice.
+
+        Args:
+            theme_name: Theme identifier to activate.
+
+        Returns:
+            None
+        """
+
+        if normalize_theme_name(theme_name) == normalize_theme_name(self.config.theme):
+            self._sync_theme_tray_actions(theme_name)
+            self._sync_editor_theme_actions(theme_name)
+            return
+        self._apply_theme(theme_name, persist=True)
 
     def show(self) -> None:
         """
@@ -467,6 +579,8 @@ class AppController:
         from src.editor_window import EditorWindow
 
         editor = EditorWindow(screenshot)
+        editor.set_theme_selection(self.config.theme)
+        editor.theme_changed.connect(self.set_theme)
         editor.setWindowIcon(self.editor_host.windowIcon())
         editor.set_minimize_to_tray_on_close(False)
         editor.setParent(self.editor_tabs)
