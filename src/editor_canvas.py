@@ -139,6 +139,7 @@ class EditorCanvas(QGraphicsView):
         )
         self._zoom_factor = 1.0
         self._initial_view_pending = False
+        self._last_action_label = "Edit"
         self._start_scene_pos = QPointF()
         self._preview_item: QGraphicsItem | None = None
         self._crop_item: CropSelectionItem | None = None
@@ -250,6 +251,32 @@ class EditorCanvas(QGraphicsView):
         if tool == Tool.CROP and not self.has_pending_crop():
             self._create_default_crop_selection()
 
+    def consume_last_action_label(self) -> str:
+        """
+        Returns and resets the last recorded canvas action label.
+
+        Returns:
+            str: Action label used for history entries.
+        """
+
+        label = self._last_action_label.strip() or "Edit"
+        self._last_action_label = "Edit"
+        return label
+
+    def _emit_content_changed(self, action_label: str) -> None:
+        """
+        Emits content change signal with a descriptive action label.
+
+        Args:
+            action_label: Human readable action description.
+
+        Returns:
+            None
+        """
+
+        self._last_action_label = action_label.strip() or "Edit"
+        self.content_changed.emit()
+
     def _apply_tool_cursor(self, tool: str) -> None:
         """
         Applies the expected mouse cursor for the active tool.
@@ -345,7 +372,7 @@ class EditorCanvas(QGraphicsView):
                     text_item.setFont(font)
                 changed = True
         if changed:
-            self.content_changed.emit()
+            self._emit_content_changed("Update selected style")
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """
@@ -380,7 +407,7 @@ class EditorCanvas(QGraphicsView):
                 item.setPos(scene_pos)
                 item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
                 configure_graphics_item(item, "text")
-                self.content_changed.emit()
+                self._emit_content_changed("Insert text")
             return
 
         if self._tool in {Tool.RECT, Tool.ELLIPSE, Tool.LINE, Tool.ARROW}:
@@ -493,7 +520,13 @@ class EditorCanvas(QGraphicsView):
 
             configure_graphics_item(self._preview_item, self._tool)
             self._preview_item = None
-            self.content_changed.emit()
+            draw_names = {
+                Tool.RECT: "Draw rectangle",
+                Tool.ELLIPSE: "Draw ellipse",
+                Tool.LINE: "Draw line",
+                Tool.ARROW: "Draw arrow",
+            }
+            self._emit_content_changed(draw_names.get(self._tool, "Draw annotation"))
             return
         super().mouseReleaseEvent(event)
         self._sync_resize_overlay_with_target()
@@ -724,7 +757,7 @@ class EditorCanvas(QGraphicsView):
         self.clear_annotations()
         self.set_screenshot(cropped)
         self.load_annotations(transformed_annotations)
-        self.content_changed.emit()
+        self._emit_content_changed("Apply crop")
 
     def _transform_annotations_for_crop(
         self,
@@ -942,7 +975,7 @@ class EditorCanvas(QGraphicsView):
                 text_item.setPos(scene_pos)
                 text_item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
                 configure_graphics_item(text_item, "text")
-                self.content_changed.emit()
+                self._emit_content_changed("Paste text")
 
     def keyPressEvent(self, event) -> None:
         """
@@ -991,7 +1024,7 @@ class EditorCanvas(QGraphicsView):
                 self._scene.removeItem(item)
                 removed = True
             if removed:
-                self.content_changed.emit()
+                self._emit_content_changed("Delete selection")
             return
         super().keyPressEvent(event)
 
@@ -1021,7 +1054,7 @@ class EditorCanvas(QGraphicsView):
                 changed = True
         if changed:
             self._sync_resize_overlay_with_target()
-            self.content_changed.emit()
+            self._emit_content_changed("Resize selection")
         return changed
 
     def _resize_item_geometry(self, item: QGraphicsItem, scale_factor: float) -> bool:
@@ -1131,7 +1164,7 @@ class EditorCanvas(QGraphicsView):
         painter.fillRect(clipped.toAlignedRect(), self._style.fill_color)
         painter.end()
         self._background_item.setPixmap(QPixmap.fromImage(image))
-        self.content_changed.emit()
+        self._emit_content_changed("Fill background")
 
     def _try_paste_image_url(self, url: str, scene_pos: QPointF) -> bool:
         """
@@ -1174,7 +1207,7 @@ class EditorCanvas(QGraphicsView):
         configure_graphics_item(item, "image")
         item.setData(2001, encode_pixmap_to_base64(pixmap))
         self._scene.addItem(item)
-        self.content_changed.emit()
+        self._emit_content_changed("Paste image")
 
     def _on_selection_changed(self) -> None:
         """
@@ -1347,7 +1380,7 @@ class EditorCanvas(QGraphicsView):
 
         if not self._resize_target_to_rect(target, old_rect, new_rect):
             return
-        self.content_changed.emit()
+        self._emit_content_changed("Resize selection")
 
     def _resize_target_to_rect(
         self,

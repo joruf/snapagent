@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QFrame,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -84,7 +85,11 @@ class EditorWindow(QMainWindow):
 
         self._record_history = True
         self._history: list[dict[str, Any]] = []
+        self._history_labels: list[str] = []
         self._history_index = -1
+        self._pending_history_label: str | None = None
+        self._syncing_history_list = False
+        self._toolbar_groups: list[QWidget] = []
         self._current_stroke_color = QColor(231, 76, 60, 255)
         self._current_fill_color = QColor(231, 76, 60, 80)
         self._current_text_color = QColor(44, 62, 80, 255)
@@ -130,9 +135,16 @@ class EditorWindow(QMainWindow):
         """
 
         bar = QWidget(self)
-        root_layout = QHBoxLayout(bar)
+        root_layout = QVBoxLayout(bar)
         root_layout.setContentsMargins(8, 6, 8, 6)
-        root_layout.setSpacing(8)
+        root_layout.setSpacing(6)
+
+        self._toolbar_groups_container = QWidget(bar)
+        self._toolbar_groups_layout = QGridLayout(self._toolbar_groups_container)
+        self._toolbar_groups_layout.setContentsMargins(0, 0, 0, 0)
+        self._toolbar_groups_layout.setHorizontalSpacing(8)
+        self._toolbar_groups_layout.setVerticalSpacing(6)
+        root_layout.addWidget(self._toolbar_groups_container)
 
         palette_colors = [
             QColor("#e74c3c"),
@@ -180,7 +192,7 @@ class EditorWindow(QMainWindow):
         self.stroke_size_spin.setValue(3)
         self.stroke_size_spin.valueChanged.connect(self._stroke_width_changed)
         tools_layout.addWidget(self.stroke_size_spin)
-        root_layout.addWidget(tools_group)
+        self._toolbar_groups.append(tools_group)
 
         colors_group = QFrame(self)
         colors_group.setFrameShape(QFrame.Shape.StyledPanel)
@@ -265,7 +277,7 @@ class EditorWindow(QMainWindow):
         opacity_row.addWidget(self.text_alpha_label)
         opacity_row.addStretch(1)
         colors_layout.addLayout(opacity_row)
-        root_layout.addWidget(colors_group)
+        self._toolbar_groups.append(colors_group)
 
         text_group, text_layout = self._create_toolbar_group("Text Style")
         text_layout.addWidget(QLabel("Font"))
@@ -303,7 +315,22 @@ class EditorWindow(QMainWindow):
         self.font_size_combo.setCurrentText("16")
         self.font_size_combo.currentTextChanged.connect(self._font_size_changed)
         text_layout.addWidget(self.font_size_combo)
-        root_layout.addWidget(text_group)
+        self._toolbar_groups.append(text_group)
+
+        history_group, history_layout = self._create_toolbar_group("History")
+        self.history_undo_button = QPushButton("Undo")
+        self.history_undo_button.clicked.connect(self.undo)
+        history_layout.addWidget(self.history_undo_button)
+        self.history_redo_button = QPushButton("Redo")
+        self.history_redo_button.clicked.connect(self.redo)
+        history_layout.addWidget(self.history_redo_button)
+        self.history_list_combo = QComboBox()
+        self.history_list_combo.setMinimumWidth(220)
+        self.history_list_combo.currentIndexChanged.connect(self._on_history_entry_selected)
+        history_layout.addWidget(self.history_list_combo)
+        self.history_status_label = QLabel("1/1")
+        history_layout.addWidget(self.history_status_label)
+        self._toolbar_groups.append(history_group)
 
         zoom_group, zoom_layout = self._create_toolbar_group("Zoom")
         self.zoom_label = QLabel("100%")
@@ -326,14 +353,48 @@ class EditorWindow(QMainWindow):
         self.zoom_reset_button = QPushButton("Reset")
         self.zoom_reset_button.clicked.connect(self.canvas.reset_zoom)
         zoom_layout.addWidget(self.zoom_reset_button)
-        root_layout.addWidget(zoom_group)
-
-        root_layout.addStretch(1)
+        self._toolbar_groups.append(zoom_group)
+        self._reflow_toolbar_groups()
         self._update_color_button_preview(self.stroke_button, QColor("#e74c3c"))
         self._update_color_button_preview(self.fill_button, QColor(231, 76, 60, 80))
         self._update_color_button_preview(self.text_color_button, QColor("#2c3e50"))
         self._apply_toolbar_tooltips()
         return bar
+
+    def _reflow_toolbar_groups(self) -> None:
+        """
+        Reflows toolbar groups into multiple rows based on available width.
+
+        Returns:
+            None
+        """
+
+        if not hasattr(self, "_toolbar_groups_layout"):
+            return
+        layout = self._toolbar_groups_layout
+        while layout.count() > 0:
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(self._toolbar_groups_container)
+
+        if not self._toolbar_groups:
+            return
+
+        available_width = max(320, self._toolbar_groups_container.width())
+        x_cursor = 0
+        row = 0
+        col = 0
+        for group in self._toolbar_groups:
+            group_width = group.sizeHint().width()
+            spacing = layout.horizontalSpacing()
+            if col > 0 and x_cursor + group_width > available_width:
+                row += 1
+                col = 0
+                x_cursor = 0
+            layout.addWidget(group, row, col)
+            x_cursor += group_width + max(0, spacing)
+            col += 1
 
     def _build_tool_icon(self, tool: str) -> QIcon:
         """
@@ -506,6 +567,10 @@ class EditorWindow(QMainWindow):
         self.zoom_in_button.setToolTip("Zoom in.")
         self.zoom_out_button.setToolTip("Zoom out.")
         self.zoom_reset_button.setToolTip("Reset zoom to fit.")
+        self.history_undo_button.setToolTip("Undo the last change.")
+        self.history_redo_button.setToolTip("Redo the last undone change.")
+        self.history_list_combo.setToolTip("History entries with action names.")
+        self.history_status_label.setToolTip("Current history position.")
 
     def _build_menu(self) -> None:
         """
@@ -582,6 +647,12 @@ class EditorWindow(QMainWindow):
 
         self.redo_action = QAction("Redo", self)
         self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self.redo_action.setShortcuts(
+            [
+                QKeySequence.StandardKey.Redo,
+                QKeySequence("Ctrl+Shift+Z"),
+            ]
+        )
         self.redo_action.setToolTip("Redo the last undone change.")
         self.redo_action.triggered.connect(self.redo)
         edit_menu.addAction(self.redo_action)
@@ -631,6 +702,33 @@ class EditorWindow(QMainWindow):
         self.canvas.set_tool(tool)
         self.statusBar().showMessage(f"Tool: {tool}")
 
+    def _set_next_history_label(self, label: str) -> None:
+        """
+        Sets a pending label for the next history snapshot.
+
+        Args:
+            label: Action label shown in history list.
+
+        Returns:
+            None
+        """
+
+        self._pending_history_label = label.strip() or "Edit"
+
+    def _consume_history_label(self) -> str:
+        """
+        Resolves the next history label from pending or canvas action.
+
+        Returns:
+            str: Chosen history label.
+        """
+
+        if self._pending_history_label:
+            label = self._pending_history_label
+            self._pending_history_label = None
+            return label
+        return self.canvas.consume_last_action_label()
+
     def _choose_stroke_color(self) -> None:
         """
         Opens alpha-enabled color picker for stroke color.
@@ -645,6 +743,7 @@ class EditorWindow(QMainWindow):
             title="Select Stroke Color",
         )
         if color.isValid():
+            self._set_next_history_label("Change border color")
             self._set_target_color("stroke", color, apply_to_canvas=False)
             self._push_history_state()
 
@@ -662,6 +761,7 @@ class EditorWindow(QMainWindow):
             title="Select Fill Color",
         )
         if color.isValid():
+            self._set_next_history_label("Change background color")
             self._set_target_color("fill", color, apply_to_canvas=False)
             self._push_history_state()
 
@@ -679,6 +779,7 @@ class EditorWindow(QMainWindow):
             title="Select Text Color",
         )
         if color.isValid():
+            self._set_next_history_label("Change text color")
             self._set_target_color("text", color, apply_to_canvas=False)
             self._push_history_state()
 
@@ -697,6 +798,12 @@ class EditorWindow(QMainWindow):
         current = self._color_for_target(target)
         updated = QColor(color)
         updated.setAlpha(current.alpha())
+        if target == "stroke":
+            self._set_next_history_label("Apply border palette color")
+        elif target == "fill":
+            self._set_next_history_label("Apply background palette color")
+        else:
+            self._set_next_history_label("Apply text palette color")
         self._set_target_color(target, updated)
         self._push_history_state()
 
@@ -783,6 +890,7 @@ class EditorWindow(QMainWindow):
             None
         """
 
+        self._set_next_history_label("Change border width")
         self.canvas.set_style(stroke_width=float(value))
         self._push_history_state()
 
@@ -797,6 +905,7 @@ class EditorWindow(QMainWindow):
             None
         """
 
+        self._set_next_history_label("Change border opacity")
         self._apply_target_alpha("stroke", value)
         self._push_history_state()
 
@@ -811,6 +920,7 @@ class EditorWindow(QMainWindow):
             None
         """
 
+        self._set_next_history_label("Change background opacity")
         self._apply_target_alpha("fill", value)
         self._push_history_state()
 
@@ -825,6 +935,7 @@ class EditorWindow(QMainWindow):
             None
         """
 
+        self._set_next_history_label("Change text opacity")
         self._apply_target_alpha("text", value)
         self._push_history_state()
 
@@ -895,6 +1006,7 @@ class EditorWindow(QMainWindow):
 
         if not value.isdigit():
             return
+        self._set_next_history_label("Change font size")
         self.canvas.set_style(font_size=int(value))
         self._push_history_state()
 
@@ -909,6 +1021,7 @@ class EditorWindow(QMainWindow):
             None
         """
 
+        self._set_next_history_label("Change font family")
         self.canvas.set_style(font_family=value)
         self._push_history_state()
 
@@ -1079,9 +1192,16 @@ class EditorWindow(QMainWindow):
             return
         snapshot = self._serialize_state()
         if self._history and snapshot == self._history[self._history_index]:
+            self._pending_history_label = None
             return
+        label = self._consume_history_label()
         self._history = self._history[: self._history_index + 1]
+        self._history_labels = self._history_labels[: self._history_index + 1]
         self._history.append(snapshot)
+        if not self._history_labels:
+            self._history_labels.append("Initial state")
+        else:
+            self._history_labels.append(label)
         self._history_index += 1
         self._update_undo_redo_actions()
 
@@ -1093,8 +1213,54 @@ class EditorWindow(QMainWindow):
             None
         """
 
-        self.undo_action.setEnabled(self._history_index > 0)
-        self.redo_action.setEnabled(self._history_index < len(self._history) - 1)
+        can_undo = self._history_index > 0
+        can_redo = self._history_index < len(self._history) - 1
+        self.undo_action.setEnabled(can_undo)
+        self.redo_action.setEnabled(can_redo)
+        self.history_undo_button.setEnabled(can_undo)
+        self.history_redo_button.setEnabled(can_redo)
+        self.history_list_combo.setEnabled(bool(self._history))
+        total_states = max(1, len(self._history))
+        current_state = max(1, self._history_index + 1)
+        self.history_status_label.setText(f"{current_state}/{total_states}")
+        self._refresh_history_list()
+
+    def _refresh_history_list(self) -> None:
+        """
+        Synchronizes visible history list entries and current position.
+
+        Returns:
+            None
+        """
+
+        self._syncing_history_list = True
+        self.history_list_combo.clear()
+        for index, label in enumerate(self._history_labels, start=1):
+            self.history_list_combo.addItem(f"{index}: {label}")
+        if self._history_index >= 0:
+            self.history_list_combo.setCurrentIndex(self._history_index)
+        self._syncing_history_list = False
+
+    def _on_history_entry_selected(self, index: int) -> None:
+        """
+        Restores a specific history entry selected in the history list.
+
+        Args:
+            index: Selected history index.
+
+        Returns:
+            None
+        """
+
+        if self._syncing_history_list:
+            return
+        if index < 0 or index >= len(self._history):
+            return
+        if index == self._history_index:
+            return
+        self._history_index = index
+        self._restore_state(self._history[self._history_index])
+        self._update_undo_redo_actions()
 
     def undo(self) -> None:
         """
@@ -1191,6 +1357,7 @@ class EditorWindow(QMainWindow):
         self.canvas.load_annotations(model.annotations)
         self._record_history = True
         self._history.clear()
+        self._history_labels.clear()
         self._history_index = -1
         self._push_history_state()
         self._current_project_path = file_path
@@ -1382,7 +1549,7 @@ class EditorWindow(QMainWindow):
             "Ctrl+Shift+S: Save project as\n"
             "Ctrl+O: Open project\n"
             "Ctrl+Z: Undo\n"
-            "Ctrl+Y: Redo\n"
+            "Ctrl+Y / Ctrl+Shift+Z: Redo\n"
             "Ctrl+C: Copy composited image\n"
             "Ctrl+V: Paste text/image/image URL\n"
             "Ctrl + Mouse Wheel: Zoom\n"
@@ -1410,7 +1577,7 @@ class EditorWindow(QMainWindow):
             "Ctrl+Shift+S  - Save project as (.sfp)\n"
             "Ctrl+O  - Open project\n"
             "Ctrl+Z  - Undo\n"
-            "Ctrl+Y  - Redo\n"
+            "Ctrl+Y / Ctrl+Shift+Z  - Redo\n"
             "Ctrl+C  - Copy composited image\n"
             "Ctrl+V  - Paste text/image/image URL\n"
             "Ctrl+Mouse Wheel  - Zoom in/out\n"
@@ -1430,6 +1597,20 @@ class EditorWindow(QMainWindow):
             self.setWindowTitle(f"{APP_NAME} Editor")
             return
         self.setWindowTitle(f"{APP_NAME} Editor - {self._current_project_path}")
+
+    def resizeEvent(self, event) -> None:
+        """
+        Reflows toolbar groups when the editor window is resized.
+
+        Args:
+            event: Qt resize event.
+
+        Returns:
+            None
+        """
+
+        super().resizeEvent(event)
+        self._reflow_toolbar_groups()
 
     def timerEvent(self, event) -> None:
         """
