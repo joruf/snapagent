@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from shutil import which
 from typing import Callable
@@ -46,6 +47,7 @@ from src.platform import (
     has_grim,
     has_grim_and_slurp,
     is_wayland_session,
+    raise_x11_window,
 )
 
 
@@ -672,12 +674,18 @@ def execute_scroll_capture(
 
         cancelled = {"value": False}
         progress.canceled.connect(lambda: cancelled.__setitem__("value", True))
+        capture_settle_seconds = 0.08
 
         def capture_without_progress_dialog():
             was_visible = progress.isVisible()
             progress.hide()
             QApplication.processEvents()
+            time.sleep(0.03)
+            QApplication.processEvents()
             try:
+                raise_x11_window(window_id)
+                time.sleep(capture_settle_seconds)
+                QApplication.processEvents()
                 return capture_full_screen()
             finally:
                 if was_visible and not cancelled["value"]:
@@ -691,6 +699,8 @@ def execute_scroll_capture(
             progress_callback=progress.update_progress,
             restore_focus_window_id=previous_focus_window_id,
         )
+        progress.hide()
+        QApplication.processEvents()
         progress.close()
 
         if result.cancelled:

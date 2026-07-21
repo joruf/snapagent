@@ -209,6 +209,38 @@ def restore_x11_window_focus(window_id: str) -> bool:
         return False
 
 
+def raise_x11_window(window_id: str) -> bool:
+    """
+    Raises one X11 window above overlapping windows for clean capture.
+
+    Args:
+        window_id: Target window id from xdotool.
+
+    Returns:
+        bool: True when the raise request succeeded.
+    """
+
+    if which("xdotool") is None:
+        return False
+    normalized = window_id.strip()
+    if not normalized or normalized == "0":
+        return False
+    try:
+        subprocess.run(
+            ["xdotool", "windowraise", normalized],
+            check=True,
+            timeout=1.0,
+        )
+        subprocess.run(
+            ["xdotool", "windowactivate", "--sync", normalized],
+            check=True,
+            timeout=2.0,
+        )
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def get_x11_focused_window_id() -> str:
     """
     Returns the currently focused X11 window id.

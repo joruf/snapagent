@@ -175,6 +175,97 @@ class TestScrollCapture(unittest.TestCase):
 
         return QPixmap.fromImage(top_image), QPixmap.fromImage(bottom_image)
 
+    def _build_scrolled_pair_with_fixed_header(
+        self,
+        fixed_header_height: int,
+        shared_height: int,
+        top_unique: int,
+        bottom_unique: int,
+    ) -> tuple[QPixmap, QPixmap]:
+        """
+        Builds two scroll frames with identical fixed browser chrome at the top.
+
+        Args:
+            fixed_header_height: Height of the non-scrolling title bar region.
+            shared_height: Shared overlap height below the fixed header.
+            top_unique: Unique top content height below the fixed header.
+            bottom_unique: Unique bottom content height below the shared region.
+
+        Returns:
+            tuple[QPixmap, QPixmap]: Upper and lower frame.
+        """
+
+        chrome = QPixmap(80, fixed_header_height)
+        chrome.fill(QColor(40, 40, 40))
+        inner_first, inner_second = self._build_scrolled_pair(
+            shared_height=shared_height,
+            top_unique=top_unique,
+            bottom_unique=bottom_unique,
+        )
+        frame_height = fixed_header_height + max(inner_first.height(), inner_second.height())
+
+        def compose_with_chrome(inner: QPixmap) -> QPixmap:
+            image = QImage(80, frame_height, QImage.Format.Format_ARGB32)
+            painter = QPainter(image)
+            painter.drawPixmap(0, 0, chrome)
+            painter.drawPixmap(0, fixed_header_height, inner)
+            remaining_height = frame_height - fixed_header_height - inner.height()
+            if remaining_height > 0:
+                filler = QPixmap(80, remaining_height)
+                filler.fill(QColor(128, 128, 128))
+                painter.drawPixmap(0, fixed_header_height + inner.height(), filler)
+            painter.end()
+            return QPixmap.fromImage(image)
+
+        return compose_with_chrome(inner_first), compose_with_chrome(inner_second)
+
+    def test_detect_fixed_header_rows_finds_browser_chrome(self) -> None:
+        """
+        Ensures identical top rows are detected as fixed browser chrome.
+        """
+
+        from src.scroll_capture import _detect_fixed_header_rows
+
+        first, second = self._build_scrolled_pair_with_fixed_header(
+            fixed_header_height=60,
+            shared_height=20,
+            top_unique=30,
+            bottom_unique=25,
+        )
+        fixed_rows = _detect_fixed_header_rows(first, second)
+        self.assertGreaterEqual(fixed_rows, 58)
+        self.assertLessEqual(fixed_rows, 62)
+
+    def test_stitch_vertical_pixmaps_skips_duplicate_fixed_header(self) -> None:
+        """
+        Ensures fixed browser chrome is not duplicated in the stitched image.
+        """
+
+        from src.scroll_capture import stitch_vertical_pixmaps
+
+        fixed_header_height = 60
+        shared_height = 20
+        top_unique = 25
+        bottom_unique = 25
+        first, second = self._build_scrolled_pair_with_fixed_header(
+            fixed_header_height=fixed_header_height,
+            shared_height=shared_height,
+            top_unique=top_unique,
+            bottom_unique=bottom_unique,
+        )
+        stitched = stitch_vertical_pixmaps([first, second])
+        expected_height = fixed_header_height + top_unique + shared_height + bottom_unique
+        self.assertFalse(stitched.isNull())
+        self.assertAlmostEqual(stitched.height(), expected_height, delta=3)
+
+        stitched_image = stitched.toImage()
+        header_color = stitched_image.pixelColor(10, 10)
+        duplicate_chrome_row = fixed_header_height + top_unique + shared_height
+        duplicate_color = stitched_image.pixelColor(10, duplicate_chrome_row)
+        self.assertLess(header_color.red(), 80)
+        self.assertGreater(duplicate_color.blue(), 100)
+        self.assertNotAlmostEqual(duplicate_color.red(), header_color.red(), delta=8)
+
     def test_stitch_vertical_pixmaps_uses_pairwise_overlap(self) -> None:
         """
         Ensures stitching consecutive frames produces the expected total height.

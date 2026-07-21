@@ -446,7 +446,6 @@ def perform_auto_scroll_capture(
                 message="No scroll frames could be captured from the selected window.",
             )
 
-        report(f"Merging {len(frames)} frame(s)...", MAX_SCROLL_FRAMES, MAX_SCROLL_FRAMES)
         merged_frames = dedupe_scroll_frames(frames)
         stitched = stitch_vertical_pixmaps(merged_frames)
         if stitched.isNull():

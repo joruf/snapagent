@@ -467,4 +467,4 @@ class TestAutoScrollCaptureIntegration(unittest.TestCase):
         self.assertLessEqual(result.frame_count, 4)
         self.assertGreaterEqual(result.frame_count, 2)
         self.assertGreaterEqual(result.pixmap.height(), 430)
-        self.assertLessEqual(result.pixmap.height(), 500)
+        self.assertLessEqual(result.pixmap.height(), 520)

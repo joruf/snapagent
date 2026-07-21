@@ -20,6 +20,9 @@ _STATIONARY_PIXEL_DIFF_RATIO = 0.012
 _CONTENT_TOP_SKIP_RATIO = 0.14
 _CONTENT_BOTTOM_SKIP_RATIO = 0.02
 _MIN_CONTENT_TOP_SKIP_PX = 80
+_FIXED_HEADER_ROW_DIFF_THRESHOLD = 0.5
+_MIN_FIXED_HEADER_ROWS = 16
+_MAX_FIXED_HEADER_SCAN_RATIO = 0.35
 
 
 @dataclass(slots=True)
@@ -50,7 +53,12 @@ def _content_column_range(width: int) -> tuple[int, int, int]:
     """
 
     content_width = max(24, width - _SCROLLBAR_EXCLUDE_WIDTH)
-    step = 1 if content_width <= 240 else _OVERLAP_SAMPLE_STEP
+    if content_width <= 240:
+        step = 1
+    elif content_width <= 900:
+        step = 2
+    else:
+        step = 4
     return 0, content_width, step
 
 
@@ -76,6 +84,37 @@ def _content_row_bounds(height: int) -> tuple[int, int]:
     row_start = min(height - 1, top_skip)
     row_end = max(row_start + 1, height - bottom_skip)
     return row_start, row_end
+
+
+def _image_row_gray_values(
+    image: QImage,
+    row_index: int,
+    x_start: int,
+    x_end: int,
+    step: int,
+) -> list[int]:
+    """
+    Reads one grayscale row from a prepared image using fast scan-line access.
+
+    Args:
+        image: Grayscale source image.
+        row_index: Row to read.
+        x_start: First column inclusive.
+        x_end: Last column exclusive.
+        step: Column sampling step.
+
+    Returns:
+        list[int]: Sampled grayscale values for the row.
+    """
+
+    width = image.width()
+    if row_index < 0 or row_index >= image.height() or x_end <= x_start:
+        return []
+
+    line = image.constScanLine(row_index)
+    row_buffer = memoryview(line).cast("B")
+    column_end = min(x_end, width)
+    return [row_buffer[column_index] for column_index in range(x_start, column_end, step)]
 
 
 def _pixmap_to_gray_rows(
@@ -107,11 +146,7 @@ def _pixmap_to_gray_rows(
     end_row = height if row_end is None else min(height, row_end)
     rows: list[list[int]] = []
     for row_index in range(start_row, end_row):
-        row_values = [
-            image.pixelColor(column_index, row_index).red()
-            for column_index in range(x_start, x_end, step)
-        ]
-        rows.append(row_values)
+        rows.append(_image_row_gray_values(image, row_index, x_start, x_end, step))
     return rows
 
 
@@ -152,11 +187,10 @@ def _average_frame_difference(
     total = 0.0
     count = 0
     for row_index in range(row_start, row_end, sample_step):
-        for column_index in range(x_start, x_end, x_step):
-            total += abs(
-                previous_image.pixelColor(column_index, row_index).red()
-                - current_image.pixelColor(column_index, row_index).red()
-            )
+        previous_row = _image_row_gray_values(previous_image, row_index, x_start, x_end, x_step)
+        current_row = _image_row_gray_values(current_image, row_index, x_start, x_end, x_step)
+        for previous_value, current_value in zip(previous_row, current_row, strict=True):
+            total += abs(previous_value - current_value)
             count += 1
     if count == 0:
         return 1.0
@@ -240,7 +274,7 @@ def measure_vertical_overlap_from_rows(
     best_overlap = min_overlap
     best_score = float("inf")
 
-    coarse_step = max(1, max_overlap // 100)
+    coarse_step = max(4, max_overlap // 32)
     for overlap in range(min_overlap, max_overlap + 1, coarse_step):
         score = _rows_block_difference(top_rows[-overlap:], bottom_rows[:overlap])
         if score < best_score or (score == best_score and overlap > best_overlap):
@@ -292,7 +326,7 @@ def measure_vertical_overlap_lenient(top_pixmap: QPixmap, bottom_pixmap: QPixmap
     best_overlap = min_overlap
     best_score = float("inf")
 
-    coarse_step = max(1, max_overlap // 100)
+    coarse_step = max(4, max_overlap // 32)
     for overlap in range(min_overlap, max_overlap + 1, coarse_step):
         score = _rows_block_difference(top_rows[-overlap:], bottom_rows[:overlap])
         if score < best_score or (score == best_score and overlap > best_overlap):
@@ -507,9 +541,134 @@ def dedupe_scroll_frames(frames: list[QPixmap]) -> list[QPixmap]:
 
     deduped = [valid_frames[0]]
     for frame in valid_frames[1:]:
-        if frame_has_meaningful_new_content(deduped[-1], frame):
-            deduped.append(frame)
+        previous = deduped[-1]
+        if previous.toImage() == frame.toImage():
+            continue
+        if _average_frame_difference(previous, frame, content_region_only=True) <= _STATIONARY_PIXEL_DIFF_RATIO:
+            continue
+        deduped.append(frame)
     return deduped
+
+
+def _detect_fixed_header_rows(top_pixmap: QPixmap, bottom_pixmap: QPixmap) -> int:
+    """
+    Counts top rows that stay identical between consecutive window captures.
+
+    Browser chrome such as the title bar and tab strip does not scroll, so
+    consecutive frames share an identical prefix that must be excluded from
+    stitch overlap matching.
+
+    Args:
+        top_pixmap: Upper screenshot segment.
+        bottom_pixmap: Lower screenshot segment.
+
+    Returns:
+        int: Number of fixed top rows shared by both frames.
+    """
+
+    if top_pixmap.isNull() or bottom_pixmap.isNull():
+        return 0
+    if top_pixmap.width() != bottom_pixmap.width():
+        return 0
+
+    top_image = top_pixmap.toImage().convertToFormat(QImage.Format.Format_Grayscale8)
+    bottom_image = bottom_pixmap.toImage().convertToFormat(QImage.Format.Format_Grayscale8)
+    height = min(top_image.height(), bottom_image.height())
+    width = min(top_image.width(), bottom_image.width())
+    if height <= 0 or width <= 0:
+        return 0
+
+    x_start, x_end, step = _content_column_range(width)
+    max_scan = min(
+        height - 1,
+        max(
+            _MIN_CONTENT_TOP_SKIP_PX,
+            int(height * _MAX_FIXED_HEADER_SCAN_RATIO),
+        ),
+    )
+
+    fixed_rows = 0
+    for row_index in range(max_scan):
+        top_row = _image_row_gray_values(top_image, row_index, x_start, x_end, step)
+        bottom_row = _image_row_gray_values(bottom_image, row_index, x_start, x_end, step)
+        if _row_difference(top_row, bottom_row) > _FIXED_HEADER_ROW_DIFF_THRESHOLD:
+            break
+        fixed_rows = row_index + 1
+
+    if fixed_rows < _MIN_FIXED_HEADER_ROWS:
+        return 0
+    return fixed_rows
+
+
+def _crop_pixmap_from_row(pixmap: QPixmap, row_start: int) -> QPixmap:
+    """
+    Returns the pixmap region below a row offset.
+
+    Args:
+        pixmap: Source pixmap.
+        row_start: First row to keep.
+
+    Returns:
+        QPixmap: Cropped pixmap or an empty pixmap when nothing remains.
+    """
+
+    if pixmap.isNull() or row_start <= 0:
+        return pixmap
+    remaining_height = pixmap.height() - row_start
+    if remaining_height <= 0:
+        return QPixmap()
+    return pixmap.copy(0, row_start, pixmap.width(), remaining_height)
+
+
+def _measure_stitch_overlap(
+    previous_frame: QPixmap,
+    frame: QPixmap,
+    previous_gray_rows: list[list[int]],
+    frame_gray_rows: list[list[int]],
+    overlap_history: list[int],
+) -> int:
+    """
+    Resolves overlap rows for stitching while accounting for fixed browser chrome.
+
+    Args:
+        previous_frame: Previous captured frame.
+        frame: Next lower frame.
+        previous_gray_rows: Cached grayscale rows for the previous frame.
+        frame_gray_rows: Cached grayscale rows for the lower frame.
+        overlap_history: Overlap values used for earlier frame pairs.
+
+    Returns:
+        int: Overlap rows to use for stitching.
+    """
+
+    frame_height = frame.height()
+    fixed_rows = _detect_fixed_header_rows(previous_frame, frame)
+    if fixed_rows <= 0:
+        match = measure_vertical_overlap_from_rows(previous_gray_rows, frame_gray_rows)
+        lenient_match = None
+        if match.overlap_rows == 0 or match.difference_score > _MAX_OVERLAP_SCORE:
+            lenient_match = measure_vertical_overlap_lenient(previous_frame, frame)
+        return _resolve_stitch_overlap(match, frame_height, overlap_history, lenient_match)
+
+    top_content_rows = previous_gray_rows[fixed_rows:]
+    bottom_content_rows = frame_gray_rows[fixed_rows:]
+    content_height = max(1, frame_height - fixed_rows)
+    match = measure_vertical_overlap_from_rows(top_content_rows, bottom_content_rows)
+    lenient_match = None
+    if match.overlap_rows == 0 or match.difference_score > _MAX_OVERLAP_SCORE:
+        lenient_match = measure_vertical_overlap_lenient(
+            _crop_pixmap_from_row(previous_frame, fixed_rows),
+            _crop_pixmap_from_row(frame, fixed_rows),
+        )
+    content_history = [max(0, overlap - fixed_rows) for overlap in overlap_history]
+    content_overlap = _resolve_stitch_overlap(
+        match,
+        content_height,
+        content_history,
+        lenient_match,
+    )
+    total_overlap = fixed_rows + content_overlap
+    return max(fixed_rows, _clamp_overlap(total_overlap, frame_height))
 
 
 def _clamp_overlap(overlap: int, frame_height: int) -> int:
@@ -615,12 +774,17 @@ def stitch_vertical_pixmaps(frames: list[QPixmap]) -> QPixmap:
 
     combined = valid_frames[0]
     overlap_history: list[int] = []
+    gray_cache = [_pixmap_to_gray_rows(frame) for frame in valid_frames]
     for frame_index in range(1, len(valid_frames)):
         previous_frame = valid_frames[frame_index - 1]
         frame = valid_frames[frame_index]
-        match = measure_vertical_overlap(previous_frame, frame)
-        lenient_match = measure_vertical_overlap_lenient(previous_frame, frame)
-        overlap = _resolve_stitch_overlap(match, frame.height(), overlap_history, lenient_match)
+        overlap = _measure_stitch_overlap(
+            previous_frame,
+            frame,
+            gray_cache[frame_index - 1],
+            gray_cache[frame_index],
+            overlap_history,
+        )
         overlap_history.append(overlap)
         combined = _append_vertical_frame(combined, frame, overlap)
     return combined
