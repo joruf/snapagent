@@ -22,6 +22,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction,
+    QBrush,
     QColor,
     QContextMenuEvent,
     QGuiApplication,
@@ -80,6 +81,12 @@ from src.image_effects import pixelate_qimage_region
 from src.models import AnnotationModel
 from src.ocr import extract_text_from_png_bytes
 from src.scroll_capture import pixmap_to_png_bytes
+from src.theme import THEME_LIGHT, current_theme_name, get_theme_colors, normalize_theme_name
+
+_WORKSPACE_MARGIN_MIN = 96.0
+_WORKSPACE_MARGIN_RATIO = 0.15
+_DOCUMENT_SHADOW_OFFSET = 4.0
+_DOCUMENT_MATTE_COLOR = "#ffffff"
 
 
 def decode_base64_to_pixmap(value: str) -> QPixmap:
@@ -162,6 +169,28 @@ class EditorCanvas(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        self.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.setFrameShape(QGraphicsView.Shape.NoFrame)
+
+        self._document_rect = QRectF()
+        self._workspace_item = QGraphicsRectItem()
+        self._workspace_item.setZValue(-2000)
+        self._workspace_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self._workspace_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+        self._document_shadow_item = QGraphicsRectItem()
+        self._document_shadow_item.setZValue(-1002)
+        self._document_shadow_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self._document_shadow_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+        self._document_matte_item = QGraphicsRectItem()
+        self._document_matte_item.setZValue(-1001)
+        self._document_matte_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self._document_matte_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+        self._scene.addItem(self._workspace_item)
+        self._scene.addItem(self._document_shadow_item)
+        self._scene.addItem(self._document_matte_item)
+        self.refresh_workspace_theme()
 
         self._tool = Tool.SELECT
         self._style = StyleState(
@@ -203,6 +232,123 @@ class EditorCanvas(QGraphicsView):
 
         self._scene.selectionChanged.connect(self._on_selection_changed)
 
+    def document_rect(self) -> QRectF:
+        """
+        Returns the drawable document bounds in scene coordinates.
+
+        Returns:
+            QRectF: Document rectangle (0, 0, width, height).
+        """
+
+        return QRectF(self._document_rect)
+
+    def refresh_workspace_theme(self, theme_name: str | None = None) -> None:
+        """
+        Updates pasteboard and document frame colors for the active theme.
+
+        Args:
+            theme_name: Optional theme identifier; uses current theme when omitted.
+
+        Returns:
+            None
+        """
+
+        colors = get_theme_colors(theme_name)
+        resolved_theme = normalize_theme_name(theme_name or current_theme_name())
+        workspace_color = QColor(colors.editor_workspace)
+        border_color = QColor(colors.editor_document_border)
+        shadow_alpha = 65 if resolved_theme == THEME_LIGHT else 85
+        shadow_color = QColor(0, 0, 0, shadow_alpha)
+
+        self.setBackgroundBrush(QBrush(workspace_color))
+        self._workspace_item.setBrush(workspace_color)
+        self._workspace_item.setPen(QPen(Qt.PenStyle.NoPen))
+        self._document_matte_item.setBrush(QColor(_DOCUMENT_MATTE_COLOR))
+        self._document_matte_item.setPen(QPen(border_color, 1.0))
+        self._document_shadow_item.setBrush(shadow_color)
+        self._document_shadow_item.setPen(QPen(Qt.PenStyle.NoPen))
+        self.viewport().update()
+
+    def _workspace_chrome_items(self) -> frozenset[QGraphicsItem]:
+        """
+        Returns scene items that form the editor pasteboard chrome.
+
+        Returns:
+            frozenset[QGraphicsItem]: Non-annotation workspace items.
+        """
+
+        return frozenset(
+            {
+                self._workspace_item,
+                self._document_shadow_item,
+                self._document_matte_item,
+                self._background_item,
+            }
+        )
+
+    def _non_annotation_scene_items(self) -> frozenset[QGraphicsItem]:
+        """
+        Returns scene items that must not be treated as user annotations.
+
+        Returns:
+            frozenset[QGraphicsItem]: Chrome and transient editor items.
+        """
+
+        blocked = set(self._workspace_chrome_items())
+        if self._crop_item is not None:
+            blocked.add(self._crop_item)
+        if self._crop_shade_item is not None:
+            blocked.add(self._crop_shade_item)
+        if self._resize_overlay_item is not None:
+            blocked.add(self._resize_overlay_item)
+        return frozenset(blocked)
+
+    def _compute_workspace_margin(self, width: float, height: float) -> float:
+        """
+        Computes pasteboard padding around the document.
+
+        Args:
+            width: Document width in pixels.
+            height: Document height in pixels.
+
+        Returns:
+            float: Workspace margin in scene units.
+        """
+
+        if width < 1.0 or height < 1.0:
+            return _WORKSPACE_MARGIN_MIN
+        return max(_WORKSPACE_MARGIN_MIN, min(width, height) * _WORKSPACE_MARGIN_RATIO)
+
+    def _update_workspace_layout(self) -> None:
+        """
+        Expands the scene pasteboard and positions document chrome items.
+
+        Returns:
+            None
+        """
+
+        document_rect = self.document_rect()
+        if document_rect.width() < 1.0 or document_rect.height() < 1.0:
+            self._workspace_item.setVisible(False)
+            self._document_shadow_item.setVisible(False)
+            self._document_matte_item.setVisible(False)
+            self._scene.setSceneRect(QRectF())
+            return
+
+        margin = self._compute_workspace_margin(document_rect.width(), document_rect.height())
+        workspace_rect = document_rect.adjusted(-margin, -margin, margin, margin)
+        self._scene.setSceneRect(workspace_rect)
+        self._workspace_item.setRect(workspace_rect)
+        self._workspace_item.setVisible(True)
+        shadow_rect = document_rect.translated(
+            _DOCUMENT_SHADOW_OFFSET,
+            _DOCUMENT_SHADOW_OFFSET,
+        )
+        self._document_shadow_item.setRect(shadow_rect)
+        self._document_shadow_item.setVisible(True)
+        self._document_matte_item.setRect(document_rect)
+        self._document_matte_item.setVisible(True)
+
     def screenshot(self) -> QPixmap:
         """
         Returns the current screenshot pixmap.
@@ -226,7 +372,8 @@ class EditorCanvas(QGraphicsView):
 
         self._background_item.setPixmap(pixmap)
         self._background_item.setPos(0, 0)
-        self._scene.setSceneRect(QRectF(pixmap.rect()))
+        self._document_rect = QRectF(pixmap.rect())
+        self._update_workspace_layout()
         self._initial_view_pending = True
         QTimer.singleShot(0, self._apply_initial_screenshot_view)
 
@@ -685,11 +832,7 @@ class EditorCanvas(QGraphicsView):
         hit_item = self.itemAt(event.position().toPoint())
         if hit_item is None:
             return False
-        if hit_item in {
-            self._background_item,
-            self._crop_shade_item,
-            self._resize_overlay_item,
-        }:
+        if hit_item in self._non_annotation_scene_items():
             return False
         if not (hit_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable):
             return False
@@ -908,7 +1051,7 @@ class EditorCanvas(QGraphicsView):
         """
 
         self.resetTransform()
-        self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.fitInView(self.document_rect(), Qt.AspectRatioMode.KeepAspectRatio)
         self._zoom_factor = 1.0
         self.zoom_changed.emit(self._zoom_factor)
 
@@ -1182,7 +1325,7 @@ class EditorCanvas(QGraphicsView):
         """
 
         for item in self._scene.items():
-            if item is self._background_item:
+            if item in self._workspace_chrome_items():
                 continue
             self._scene.removeItem(item)
         self._crop_item = None
@@ -1200,7 +1343,7 @@ class EditorCanvas(QGraphicsView):
 
         models: list[AnnotationModel] = []
         for item in self._scene.items():
-            if item is self._background_item:
+            if item in self._workspace_chrome_items():
                 continue
             if item is self._crop_item:
                 continue
@@ -1237,7 +1380,7 @@ class EditorCanvas(QGraphicsView):
             QPixmap: Composited output.
         """
 
-        rect = self._scene.sceneRect().toRect()
+        rect = self.document_rect().toRect()
         resize_overlay_was_visible = False
         if self._resize_overlay_item is not None:
             resize_overlay_was_visible = self._resize_overlay_item.isVisible()
@@ -1337,7 +1480,7 @@ class EditorCanvas(QGraphicsView):
                 return
             removed = False
             for item in list(self._scene.selectedItems()):
-                if item is self._background_item:
+                if item in self._workspace_chrome_items():
                     continue
                 if item is self._crop_item:
                     self.cancel_crop()
@@ -1365,12 +1508,7 @@ class EditorCanvas(QGraphicsView):
             return False
         changed = False
         for item in self._scene.selectedItems():
-            if item in {
-                self._background_item,
-                self._crop_item,
-                self._crop_shade_item,
-                self._resize_overlay_item,
-            }:
+            if item in self._non_annotation_scene_items():
                 continue
             if self._resize_item_geometry(item, scale_factor):
                 changed = True
@@ -1475,7 +1613,7 @@ class EditorCanvas(QGraphicsView):
             None
         """
 
-        clipped = rect.intersected(self._scene.sceneRect()).normalized()
+        clipped = rect.intersected(self.document_rect()).normalized()
         if clipped.width() < 1 or clipped.height() < 1:
             return
         screenshot = self.screenshot()
@@ -1522,7 +1660,7 @@ class EditorCanvas(QGraphicsView):
             None
         """
 
-        clipped = rect.intersected(self._scene.sceneRect()).normalized()
+        clipped = rect.intersected(self.document_rect()).normalized()
         if clipped.width() < 1 or clipped.height() < 1:
             return
         screenshot = self.screenshot()
@@ -1548,7 +1686,7 @@ class EditorCanvas(QGraphicsView):
         selected_items = [
             item
             for item in self._scene.selectedItems()
-            if item not in {self._background_item, self._crop_item, self._crop_shade_item, self._resize_overlay_item}
+            if item not in self._non_annotation_scene_items()
         ]
         if not selected_items:
             return False
@@ -1671,7 +1809,7 @@ class EditorCanvas(QGraphicsView):
             None
         """
 
-        clipped = rect.intersected(self._scene.sceneRect()).normalized()
+        clipped = rect.intersected(self.document_rect()).normalized()
         if clipped.width() < 2 or clipped.height() < 2:
             return
         composited = self.export_composited_pixmap()
@@ -1998,12 +2136,7 @@ class EditorCanvas(QGraphicsView):
 
         items: list[QGraphicsItem] = []
         for item in self._scene.items():
-            if item in {
-                self._background_item,
-                self._crop_item,
-                self._crop_shade_item,
-                self._resize_overlay_item,
-            }:
+            if item in self._non_annotation_scene_items():
                 continue
             if not str(item.data(ITEM_ROLE_TYPE) or ""):
                 continue
@@ -2026,7 +2159,7 @@ class EditorCanvas(QGraphicsView):
         selected = [
             item
             for item in self._scene.selectedItems()
-            if item not in {self._background_item, self._crop_item, self._crop_shade_item, self._resize_overlay_item}
+            if item not in self._non_annotation_scene_items()
         ]
         if not selected:
             self._alignment_guides.clear()
@@ -2130,21 +2263,31 @@ class EditorCanvas(QGraphicsView):
         """
 
         super().drawForeground(painter, rect)
+        document_rect = self.document_rect()
+        if document_rect.width() < 1.0 or document_rect.height() < 1.0:
+            return
         if self._grid_visible:
             grid_pen = QPen(QColor(255, 255, 255, 30), 0)
             painter.setPen(grid_pen)
             size = max(4, self._grid_size)
-            start_x = int(rect.left() // size) * size
-            end_x = int(rect.right()) + size
-            start_y = int(rect.top() // size) * size
-            end_y = int(rect.bottom()) + size
+            grid_rect = document_rect.intersected(rect)
+            start_x = int(grid_rect.left() // size) * size
+            end_x = int(grid_rect.right()) + size
+            start_y = int(grid_rect.top() // size) * size
+            end_y = int(grid_rect.bottom()) + size
             x = start_x
             while x <= end_x:
-                painter.drawLine(QPointF(float(x), rect.top()), QPointF(float(x), rect.bottom()))
+                painter.drawLine(
+                    QPointF(float(x), grid_rect.top()),
+                    QPointF(float(x), grid_rect.bottom()),
+                )
                 x += size
             y = start_y
             while y <= end_y:
-                painter.drawLine(QPointF(rect.left(), float(y)), QPointF(rect.right(), float(y)))
+                painter.drawLine(
+                    QPointF(grid_rect.left(), float(y)),
+                    QPointF(grid_rect.right(), float(y)),
+                )
                 y += size
 
         if self._alignment_guides:
@@ -2196,7 +2339,7 @@ class EditorCanvas(QGraphicsView):
 
         if self._crop_item is None or self._crop_shade_item is None:
             return
-        outer = QRectF(self._scene.sceneRect())
+        outer = QRectF(self.document_rect())
         inner = self._crop_item.scene_rect().normalized()
         path = QPainterPath()
         path.setFillRule(Qt.FillRule.OddEvenFill)
@@ -2212,7 +2355,7 @@ class EditorCanvas(QGraphicsView):
             None
         """
 
-        rect = QRectF(self._scene.sceneRect())
+        rect = QRectF(self.document_rect())
         self._crop_item = CropSelectionItem(rect)
         self._crop_item.on_geometry_changed = self._update_crop_shade
         self._scene.addItem(self._crop_item)

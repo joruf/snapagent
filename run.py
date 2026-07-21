@@ -923,6 +923,9 @@ class AppController:
         editor.set_theme_selection(self.config.theme)
         editor.theme_changed.connect(self.set_theme)
         editor.settings_requested.connect(self.show_settings_dialog)
+        editor.new_canvas_requested.connect(
+            lambda: self.create_new_canvas_tab(editor),
+        )
         editor.setWindowIcon(self._editor_icon)
         editor.set_minimize_to_tray_on_close(False)
         editor.setParent(self.editor_tabs)
@@ -963,7 +966,7 @@ class AppController:
             list: Serializable editor session tabs.
         """
 
-        from src.session_recovery import EditorSessionTab
+        from src.session_recovery import EditorSessionTab, ensure_tab_recovery_path
 
         tabs: list[EditorSessionTab] = []
         for tab_index in range(self.editor_tabs.count()):
@@ -973,7 +976,8 @@ class AppController:
             try:
                 self._flush_editor_tab_recovery(editor)
                 title = self.editor_tabs.tabText(tab_index).strip() or f"Tab {tab_index + 1}"
-                recovery_path = editor.recovery_path()
+                recovery_path = ensure_tab_recovery_path(editor.recovery_path())
+                editor.set_recovery_path(recovery_path)
                 source_path = getattr(editor, "_current_project_path", "")
             except RuntimeError:
                 continue
@@ -1194,13 +1198,54 @@ class AppController:
         """
 
         if self.editor_tabs.count() == 0:
-            from PySide6.QtGui import QColor, QPixmap
-
-            blank_pixmap = QPixmap(1280, 720)
-            blank_pixmap.fill(QColor(255, 255, 255, 255))
-            self._create_editor_tab(blank_pixmap, "New Canvas")
+            self.create_new_canvas_tab(self.capture_panel)
             return
         self._show_editor_host()
+
+    def create_new_canvas_tab(self, parent=None) -> None:
+        """
+        Prompts for canvas size and opens one blank editor tab.
+
+        Args:
+            parent: Optional parent widget for the size dialog.
+
+        Returns:
+            None
+        """
+
+        from PySide6.QtWidgets import QDialog
+
+        from src.new_canvas_dialog import NewCanvasDialog
+
+        dialog = NewCanvasDialog(parent or self.capture_panel)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        selected_size = dialog.selected_size()
+        if selected_size is None:
+            return
+
+        width, height = selected_size
+        pixmap = self._build_blank_canvas_pixmap(width, height)
+        self._create_editor_tab(pixmap, f"New Canvas {width}×{height}")
+
+    def _build_blank_canvas_pixmap(self, width: int, height: int):
+        """
+        Creates one blank white canvas pixmap.
+
+        Args:
+            width: Canvas width in pixels.
+            height: Canvas height in pixels.
+
+        Returns:
+            QPixmap: Blank canvas pixmap.
+        """
+
+        from PySide6.QtGui import QColor, QPixmap
+
+        pixmap = QPixmap(width, height)
+        pixmap.fill(QColor(255, 255, 255, 255))
+        return pixmap
 
     def _show_editor_host(self) -> None:
         """

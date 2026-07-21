@@ -5,6 +5,7 @@ Unit tests for multi-tab editor session recovery.
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from src.session_recovery import (
     EditorSessionTab,
     clear_editor_session,
     create_tab_recovery_path,
+    ensure_tab_recovery_path,
     has_editor_session,
     load_editor_session,
     load_legacy_recovery_tab,
@@ -129,6 +131,20 @@ class TestSessionRecovery(unittest.TestCase):
                 first = create_tab_recovery_path()
                 second = create_tab_recovery_path()
             self.assertNotEqual(first, second)
+
+    def test_ensure_tab_recovery_path_recreates_missing_session_directory(self) -> None:
+        """
+        Ensures missing session directories are recreated for recovery saves.
+        """
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_dir = Path(temp_dir)
+            recovery_path = str(session_dir / f"tab-test{APP_FILE_EXTENSION}")
+            shutil.rmtree(session_dir)
+            with patch("src.session_recovery._session_root_dir", return_value=session_dir):
+                ensured_path = ensure_tab_recovery_path(recovery_path)
+            self.assertEqual(ensured_path, recovery_path)
+            self.assertTrue(session_dir.is_dir())
 
     def test_load_legacy_recovery_tab_reads_single_snapshot(self) -> None:
         """

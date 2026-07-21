@@ -43,6 +43,8 @@ class ThemeColors:
         palette_border: Border around color palette swatches.
         scrollbar_bg: Scrollbar track background.
         scrollbar_handle: Scrollbar handle color.
+        editor_workspace: Gray pasteboard behind the drawable document.
+        editor_document_border: Border around the document canvas.
     """
 
     window_bg: str
@@ -64,6 +66,8 @@ class ThemeColors:
     palette_border: str
     scrollbar_bg: str
     scrollbar_handle: str
+    editor_workspace: str
+    editor_document_border: str
 
 
 _DARK_COLORS = ThemeColors(
@@ -86,6 +90,8 @@ _DARK_COLORS = ThemeColors(
     palette_border="#59657c",
     scrollbar_bg="#2a3040",
     scrollbar_handle="#434d63",
+    editor_workspace="#4d525c",
+    editor_document_border="#2f3541",
 )
 
 _LIGHT_COLORS = ThemeColors(
@@ -108,6 +114,8 @@ _LIGHT_COLORS = ThemeColors(
     palette_border="#94a3b8",
     scrollbar_bg="#eef1f5",
     scrollbar_handle="#cbd5e1",
+    editor_workspace="#b8bcc4",
+    editor_document_border="#8b939e",
 )
 
 _THEME_COLORS: dict[str, ThemeColors] = {

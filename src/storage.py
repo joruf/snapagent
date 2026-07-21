@@ -94,6 +94,8 @@ def save_project(path: str | Path, model: ProjectModel) -> None:
     if output_path.suffix.lower() != APP_FILE_EXTENSION:
         output_path = output_path.with_suffix(APP_FILE_EXTENSION)
 
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     manifest = model.to_dict()
     screenshot_data = base64.b64decode(model.screenshot_png_base64.encode("utf-8"))
     manifest["screenshot_png_base64"] = ""

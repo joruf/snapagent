@@ -125,6 +125,19 @@ class TestStorage(unittest.TestCase):
             self.assertTrue(bool(restored_payload.get("image_png_base64")))
             self.assertIsNone(restored_payload.get("image_asset_path"))
 
+    def test_save_project_creates_missing_parent_directories(self) -> None:
+        """
+        Ensures project saves create missing parent folders automatically.
+        """
+
+        screenshot = _solid_pixmap(12, 12, QColor(255, 255, 255, 255))
+        model = build_project_model(screenshot, [])
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = Path(tmp_dir) / "nested" / "session" / "canvas.sfp"
+            save_project(target, model)
+            self.assertTrue(target.is_file())
+
     def test_load_project_supports_legacy_json(self) -> None:
         """
         Ensures JSON-based legacy projects can be loaded.

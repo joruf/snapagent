@@ -89,6 +89,7 @@ class EditorWindow(QMainWindow):
     close_requested = Signal()
     theme_changed = Signal(str)
     settings_requested = Signal()
+    new_canvas_requested = Signal()
 
     def __init__(self, screenshot: QPixmap) -> None:
         """
@@ -878,6 +879,14 @@ class EditorWindow(QMainWindow):
         view_menu = menu.addMenu("View")
         help_menu = menu.addMenu("Help")
 
+        new_canvas_action = QAction("New Canvas...", self)
+        new_canvas_action.setShortcut(QKeySequence.StandardKey.New)
+        new_canvas_action.setToolTip("Create a blank canvas with a custom size.")
+        new_canvas_action.triggered.connect(self.new_canvas_requested.emit)
+        file_menu.addAction(new_canvas_action)
+
+        file_menu.addSeparator()
+
         open_action = QAction("Open Project...", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.setToolTip("Open an existing SnapAgent project.")
@@ -1377,6 +1386,7 @@ class EditorWindow(QMainWindow):
         self._update_color_button_preview(self.stroke_button, self._current_stroke_color)
         self._update_color_button_preview(self.fill_button, self._current_fill_color)
         self._update_color_button_preview(self.text_color_button, self._current_text_color)
+        self.canvas.refresh_workspace_theme()
 
     def _stroke_width_changed(self, value: int) -> None:
         """
@@ -2168,7 +2178,12 @@ class EditorWindow(QMainWindow):
         if not self.has_recovery_snapshot():
             return False
         recovery_path = self.recovery_path() or self.recovery_snapshot_path()
-        project_model = load_project(recovery_path)
+        if not os.path.isfile(recovery_path):
+            return False
+        try:
+            project_model = load_project(recovery_path)
+        except OSError:
+            return False
         self.load_project_model(project_model, "")
         self.statusBar().showMessage("Recovered auto-saved project")
         return True
@@ -2532,14 +2547,24 @@ class EditorWindow(QMainWindow):
         if not self._recovery_path:
             return
 
+        from src.session_recovery import ensure_tab_recovery_path
+
+        self._recovery_path = ensure_tab_recovery_path(self._recovery_path)
+
         model = build_project_model(
             screenshot=self.canvas.screenshot(),
             annotation_models=self.canvas.collect_annotations(),
         )
-        save_project(self._recovery_path, model)
+        try:
+            save_project(self._recovery_path, model)
+        except OSError:
+            return
 
-        if self._current_project_path:
-            save_project(self._current_project_path, model)
+        if self._current_project_path and self._current_project_path != self._recovery_path:
+            try:
+                save_project(self._current_project_path, model)
+            except OSError:
+                return
 
     def set_minimize_to_tray_on_close(self, enabled: bool) -> None:
         """

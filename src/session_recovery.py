@@ -77,6 +77,35 @@ def create_tab_recovery_path() -> str:
     return str(session_dir / f"tab-{uuid4().hex}{APP_FILE_EXTENSION}")
 
 
+def ensure_tab_recovery_path(existing_path: str) -> str:
+    """
+    Ensures one tab recovery path remains writable.
+
+    Reuses the existing path when possible and allocates a new path when the
+    session directory was removed from the temporary folder.
+
+    Args:
+        existing_path: Current recovery project path for one editor tab.
+
+    Returns:
+        str: Writable recovery project path.
+    """
+
+    normalized = existing_path.strip()
+    if not normalized:
+        return create_tab_recovery_path()
+
+    target = Path(normalized)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return create_tab_recovery_path()
+
+    if target.parent != _session_root_dir():
+        return create_tab_recovery_path()
+    return str(target)
+
+
 def has_editor_session() -> bool:
     """
     Indicates whether a recoverable multi-tab editor session exists.

@@ -152,7 +152,7 @@ class CapturePanel(QWidget):
         self.open_editor_button.setFlat(True)
         self.open_editor_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.open_editor_button.setToolTip(
-            "Open the editor window with your existing tabs."
+            "Open the editor or create a blank canvas without taking a screenshot."
         )
         self.open_editor_button.clicked.connect(self.editor_requested.emit)
         open_editor_row = QHBoxLayout()

@@ -307,9 +307,9 @@ class TestEditorCanvasResize(unittest.TestCase):
         canvas._apply_initial_screenshot_view()  # pylint: disable=protected-access
 
         visible_rect = canvas.mapToScene(canvas.viewport().rect()).boundingRect()
-        scene_rect = canvas.sceneRect()
-        self.assertGreaterEqual(visible_rect.width(), scene_rect.width() * 0.95)
-        self.assertGreaterEqual(visible_rect.height(), scene_rect.height() * 0.95)
+        document_rect = canvas.document_rect()
+        self.assertGreaterEqual(visible_rect.width(), document_rect.width() * 0.95)
+        self.assertGreaterEqual(visible_rect.height(), document_rect.height() * 0.95)
         self.assertLessEqual(canvas.transform().m11(), 1.0)
 
     def test_resize_selected_image_updates_scale(self) -> None:
