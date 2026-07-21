@@ -96,6 +96,7 @@ class EditorWindow(QMainWindow):
         self._tool_button_order: list[str] = []
         self._tool_button_labels: dict[str, str] = {}
         self._tool_button_to_key: dict[QToolButton, str] = {}
+        self._tool_button_fixed_width = 116
         self._current_stroke_color = QColor(231, 76, 60, 255)
         self._current_fill_color = QColor(231, 76, 60, 80)
         self._current_text_color = QColor(44, 62, 80, 255)
@@ -168,6 +169,18 @@ class EditorWindow(QMainWindow):
         ]
 
         tools_group, tools_layout = self._create_toolbar_group("Tools")
+        tools_vertical_layout = QVBoxLayout()
+        tools_vertical_layout.setContentsMargins(0, 0, 0, 0)
+        tools_vertical_layout.setSpacing(4)
+        tools_layout.addLayout(tools_vertical_layout)
+
+        self._tools_buttons_container = QWidget(tools_group)
+        self._tools_buttons_layout = QGridLayout(self._tools_buttons_container)
+        self._tools_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self._tools_buttons_layout.setHorizontalSpacing(4)
+        self._tools_buttons_layout.setVerticalSpacing(4)
+        tools_vertical_layout.addWidget(self._tools_buttons_container)
+
         self._tool_buttons: dict[str, QToolButton] = {}
         for tool_key, label in [
             (Tool.SELECT, "Select"),
@@ -184,28 +197,34 @@ class EditorWindow(QMainWindow):
             button.setCheckable(True)
             button.setIcon(self._build_tool_icon(tool_key))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            button.setFixedWidth(self._tool_button_fixed_width)
             button.clicked.connect(
                 lambda _checked=False, t=tool_key: self._on_tool_button_clicked(t)
             )
             button.installEventFilter(self)
-            tools_layout.addWidget(button)
             self._tool_buttons[tool_key] = button
             self._tool_button_order.append(tool_key)
             self._tool_button_labels[tool_key] = label
             self._tool_button_to_key[button] = tool_key
         self._tool_buttons[Tool.SELECT].setChecked(True)
+        self._reflow_tool_buttons()
 
+        tools_actions_row = QHBoxLayout()
+        tools_actions_row.setContentsMargins(0, 0, 0, 0)
+        tools_actions_row.setSpacing(4)
         self.apply_crop_button = QPushButton("Apply Crop")
         self.apply_crop_button.setEnabled(False)
         self.apply_crop_button.clicked.connect(self.canvas.apply_pending_crop)
-        tools_layout.addWidget(self.apply_crop_button)
+        tools_actions_row.addWidget(self.apply_crop_button)
 
-        tools_layout.addWidget(QLabel("Border"))
+        tools_actions_row.addWidget(QLabel("Border"))
         self.stroke_size_spin = QSpinBox()
         self.stroke_size_spin.setRange(1, 32)
         self.stroke_size_spin.setValue(3)
         self.stroke_size_spin.valueChanged.connect(self._stroke_width_changed)
-        tools_layout.addWidget(self.stroke_size_spin)
+        tools_actions_row.addWidget(self.stroke_size_spin)
+        tools_actions_row.addStretch(1)
+        tools_vertical_layout.addLayout(tools_actions_row)
         self._toolbar_groups.append(tools_group)
 
         colors_group = QFrame(self)
@@ -227,6 +246,7 @@ class EditorWindow(QMainWindow):
         stroke_row.setContentsMargins(0, 0, 0, 0)
         stroke_row.setSpacing(4)
         self.stroke_button = QPushButton("Border")
+        self.stroke_button.setFixedWidth(110)
         self.stroke_button.clicked.connect(self._choose_stroke_color)
         stroke_row.addWidget(self.stroke_button)
         for color in palette_colors:
@@ -247,6 +267,7 @@ class EditorWindow(QMainWindow):
         fill_row.setContentsMargins(0, 0, 0, 0)
         fill_row.setSpacing(4)
         self.fill_button = QPushButton("Background")
+        self.fill_button.setFixedWidth(110)
         self.fill_button.clicked.connect(self._choose_fill_color)
         fill_row.addWidget(self.fill_button)
         for color in palette_colors:
@@ -267,6 +288,7 @@ class EditorWindow(QMainWindow):
         text_row.setContentsMargins(0, 0, 0, 0)
         text_row.setSpacing(4)
         self.text_color_button = QPushButton("Text")
+        self.text_color_button.setFixedWidth(110)
         self.text_color_button.clicked.connect(self._choose_text_color)
         text_row.addWidget(self.text_color_button)
         for color in palette_colors:
@@ -366,6 +388,33 @@ class EditorWindow(QMainWindow):
         self._apply_toolbar_tooltips()
         return bar
 
+    def _reflow_tool_buttons(self) -> None:
+        """
+        Reflows tool buttons into equal-width wrapped rows.
+
+        Returns:
+            None
+        """
+
+        if not hasattr(self, "_tools_buttons_layout"):
+            return
+        layout = self._tools_buttons_layout
+        while layout.count() > 0:
+            layout.takeAt(0)
+
+        if not self._tool_button_order:
+            return
+
+        spacing = max(0, layout.horizontalSpacing())
+        cell_width = self._tool_button_fixed_width + spacing
+        available_width = max(cell_width, self._tools_buttons_container.width())
+        columns = max(1, available_width // max(1, cell_width))
+
+        for index, tool_key in enumerate(self._tool_button_order):
+            row = index // columns
+            column = index % columns
+            layout.addWidget(self._tool_buttons[tool_key], row, column)
+
     def _reflow_toolbar_groups(self) -> None:
         """
         Reflows toolbar groups into multiple rows based on available width.
@@ -400,6 +449,7 @@ class EditorWindow(QMainWindow):
             layout.addWidget(group, row, col)
             x_cursor += group_width + max(0, spacing)
             col += 1
+        self._reflow_tool_buttons()
 
     def _build_tool_icon(self, tool: str) -> QIcon:
         """
@@ -1775,6 +1825,7 @@ class EditorWindow(QMainWindow):
 
         super().resizeEvent(event)
         self._reflow_toolbar_groups()
+        self._reflow_tool_buttons()
 
     def timerEvent(self, event) -> None:
         """
