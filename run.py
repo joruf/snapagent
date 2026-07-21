@@ -342,7 +342,7 @@ class AppController:
     Coordinates capture panel, editor windows, and app settings.
     """
 
-    def __init__(self, app: QApplication) -> None:
+    def __init__(self, app: QApplication, startup_project_path: str = "") -> None:
         """
         Initializes controller state.
 
@@ -374,6 +374,7 @@ class AppController:
 
         self._QMessageBox = QMessageBox
         self.app = app
+        self._startup_project_path = startup_project_path.strip()
         self._is_quitting = False
         self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
         self.capture_panel = CapturePanel()
@@ -447,6 +448,9 @@ class AppController:
         self.app.setWindowIcon(self.capture_panel.windowIcon())
         self.app.setDesktopFileName("snapagent")
         self.capture_panel.show()
+        if self._startup_project_path:
+            self._open_project_in_editor(self._startup_project_path)
+            return
         self._maybe_restore_recovery_snapshot()
 
     def _create_editor_tab(self, screenshot, title: str) -> "EditorWindow":
@@ -520,6 +524,33 @@ class AppController:
         screenshot = base64_png_to_pixmap(recovered_model.screenshot_png_base64)
         editor = self._create_editor_tab(screenshot, "Recovered Session")
         editor.load_project_model(recovered_model, "")
+
+    def _open_project_in_editor(self, project_path: str) -> None:
+        """
+        Loads one project file into a new editor tab.
+
+        Args:
+            project_path: Project file path.
+
+        Returns:
+            None
+        """
+
+        from src.storage import base64_png_to_pixmap, load_project
+
+        try:
+            model = load_project(project_path)
+        except Exception as exc:
+            self._QMessageBox.warning(
+                self.capture_panel,
+                "Open Project",
+                f"Could not open project:\n{exc}",
+            )
+            return
+        screenshot = base64_png_to_pixmap(model.screenshot_png_base64)
+        tab_title = Path(project_path).name
+        editor = self._create_editor_tab(screenshot, tab_title)
+        editor.load_project_model(model, project_path)
 
     def start_capture(self, request: CaptureRequest) -> None:
         """
@@ -664,7 +695,7 @@ class AppController:
 
         request = CaptureRequest(
             mode=CaptureMode.REGION,
-            delay_seconds=int(self.capture_panel.delay_spin.value()),
+            delay_seconds=int(self.capture_panel.delay_slider.value()),
         )
         self.start_capture(request)
 
@@ -680,7 +711,7 @@ class AppController:
 
         request = CaptureRequest(
             mode=CaptureMode.WINDOW,
-            delay_seconds=int(self.capture_panel.delay_spin.value()),
+            delay_seconds=int(self.capture_panel.delay_slider.value()),
         )
         self.start_capture(request)
 
@@ -864,6 +895,28 @@ def main() -> int:
     runtime_code = _ensure_qt_runtime()
     if runtime_code != 0:
         return runtime_code
+    cli_commands = {"capture", "pick-color", "export", "open"}
+    if len(sys.argv) > 1 and sys.argv[1] in cli_commands:
+        from src.cli import run_cli
+
+        def launch_gui_with_project(project_path: str) -> int:
+            return _launch_gui(startup_project_path=project_path)
+
+        return run_cli(sys.argv[1:], launch_gui_with_project)
+    return _launch_gui()
+
+
+def _launch_gui(startup_project_path: str = "") -> int:
+    """
+    Starts the Qt GUI application.
+
+    Args:
+        startup_project_path: Optional project path to open at startup.
+
+    Returns:
+        int: Process exit code.
+    """
+
     if not _acquire_single_instance_lock():
         print("SnapAgent is already running.")
         return 0
@@ -880,7 +933,7 @@ def main() -> int:
     editor_icon = QIcon(str(_editor_icon_path()))
     app.setWindowIcon(capture_icon)
     _maybe_prompt_desktop_shortcut()
-    controller = AppController(app)
+    controller = AppController(app, startup_project_path=startup_project_path)
     controller.capture_panel.setWindowIcon(capture_icon)
     controller.editor_host.setWindowIcon(editor_icon)
     controller.show()

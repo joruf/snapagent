@@ -105,6 +105,29 @@ On first start, SnapAgent creates a local `.venv`, installs dependencies, and re
   - Use `Enter` to apply active crop selection.
   - Use `Esc` to cancel crop selection or active capture overlay.
 
+## CLI
+
+SnapAgent also supports command-line control:
+
+```bash
+# Capture full desktop as PNG
+python3 run.py capture --mode full_screen --delay 1 --output /tmp/shot
+
+# Interactive region or window capture
+python3 run.py capture --mode region --output /tmp/area.png
+python3 run.py capture --mode window --output /tmp/window.png
+
+# Interactive color picker (prints HEX, optional clipboard copy)
+python3 run.py pick-color --clipboard
+
+# Export project without opening the editor
+python3 run.py export --project ./example.sfp --format jpg --jpg-quality 90 --output ./export.jpg
+python3 run.py export --project ./example.sfp --format pdf --pdf-dpi 300 --output ./export.pdf
+
+# Open one project directly in GUI editor host
+python3 run.py open --project ./example.sfp
+```
+
 ## Keyboard Shortcuts
 
 - `Ctrl+S`: open export dialog

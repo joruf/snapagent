@@ -8,7 +8,18 @@ import base64
 from typing import Any
 
 import requests
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QByteArray,
+    QBuffer,
+    QIODevice,
+    QPoint,
+    QPointF,
+    QRectF,
+    Qt,
+    QTimer,
+    Signal,
+    QLineF,
+)
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -16,7 +27,6 @@ from PySide6.QtGui import (
     QGuiApplication,
     QImage,
     QKeySequence,
-    QLineF,
     QMouseEvent,
     QPainter,
     QPainterPath,
