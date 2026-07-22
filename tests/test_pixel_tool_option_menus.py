@@ -22,7 +22,7 @@ except ModuleNotFoundError:
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is required for toolbar menu tests")
 class TestPixelToolOptionMenus(unittest.TestCase):
     """
-    Verifies Contiguous and erase-mode options live on toolbar popup menus.
+    Verifies Contiguous, erase-mode, blur, and wand options live on tool popups.
     """
 
     @classmethod
@@ -54,9 +54,9 @@ class TestPixelToolOptionMenus(unittest.TestCase):
         self.assertFalse(hasattr(window, "erase_mode_combo"))
         window.close()
 
-    def test_magic_wand_menu_includes_contiguous_and_erase(self) -> None:
+    def test_magic_wand_menu_includes_tolerance_contiguous_and_erase(self) -> None:
         """
-        Ensures Magic Wand menu includes Contiguous plus erase modes.
+        Ensures Magic Wand menu includes tolerance slider plus Contiguous/erase.
         """
 
         pixmap = QPixmap(80, 60)
@@ -68,7 +68,11 @@ class TestPixelToolOptionMenus(unittest.TestCase):
             titles,
             ["Contiguous", "Erase: Transparent", "Erase: Fill color"],
         )
+        self.assertFalse(hasattr(window, "wand_tolerance_spin"))
         self.assertFalse(hasattr(window, "wand_contiguous_button"))
+        window.wand_tolerance_slider.setValue(64)
+        self.assertEqual(window.canvas.wand_tolerance(), 64)
+        self.assertEqual(window.wand_tolerance_label.text(), "64")
         window.close()
 
     def test_popup_actions_update_canvas_options(self) -> None:
@@ -87,6 +91,51 @@ class TestPixelToolOptionMenus(unittest.TestCase):
         self.assertEqual(window.canvas.erase_mode(), ERASE_MODE_FILL)
         window.erase_transparent_action.trigger()
         self.assertEqual(window.canvas.erase_mode(), ERASE_MODE_TRANSPARENT)
+        window.close()
+
+    def test_blur_tool_menu_exposes_pixel_block_slider(self) -> None:
+        """
+        Ensures Blur exposes pixel block size only via its toolbar popup.
+        """
+
+        pixmap = QPixmap(80, 60)
+        pixmap.fill(QColor(220, 220, 220))
+        window = EditorWindow(pixmap)
+        button = window._tool_buttons[Tool.BLUR]  # pylint: disable=protected-access
+        self.assertIsNotNone(button.menu())
+        self.assertEqual(
+            button.popupMode(),
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup,
+        )
+        self.assertFalse(hasattr(window, "blur_block_spin"))
+        self.assertFalse(hasattr(window, "blur_block_slider"))
+        window.blur_block_menu_slider.setValue(24)
+        self.assertEqual(window.canvas.blur_block_size(), 24)
+        self.assertEqual(window.blur_block_menu_label.text(), "24")
+        window.close()
+
+    def test_crop_reclick_applies_pending_selection(self) -> None:
+        """
+        Ensures clicking Crop again applies a pending crop selection.
+        """
+
+        from PySide6.QtCore import QRectF
+        from src.crop_item import CropSelectionItem
+
+        pixmap = QPixmap(120, 80)
+        pixmap.fill(QColor(220, 220, 220))
+        window = EditorWindow(pixmap)
+        self.assertFalse(hasattr(window, "apply_crop_button"))
+        window._set_tool(Tool.CROP)  # pylint: disable=protected-access
+        crop_item = CropSelectionItem(QRectF(10.0, 10.0, 40.0, 30.0))
+        window.canvas.scene().addItem(crop_item)
+        window.canvas._crop_item = crop_item  # pylint: disable=protected-access
+        self.assertTrue(window.canvas.has_pending_crop())
+        before = window.canvas.screenshot().size()
+        window._on_tool_button_clicked(Tool.CROP)  # pylint: disable=protected-access
+        after = window.canvas.screenshot().size()
+        self.assertNotEqual((before.width(), before.height()), (after.width(), after.height()))
+        self.assertFalse(window.canvas.has_pending_crop())
         window.close()
 
 

@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from src.constants import (
@@ -608,11 +609,6 @@ class EditorWindow(QMainWindow):
         style_layout.addWidget(self.text_alpha_label)
 
         style_layout.addSpacing(6)
-        self.apply_crop_button = QPushButton("Apply Crop")
-        self.apply_crop_button.setEnabled(False)
-        self.apply_crop_button.clicked.connect(self.canvas.apply_pending_crop)
-        self._configure_compact_toolbar_height(self.apply_crop_button)
-        style_layout.addWidget(self.apply_crop_button)
         style_layout.addWidget(self._create_toolbar_label("Width"))
         self.stroke_size_slider = QSlider(Qt.Orientation.Horizontal)
         self.stroke_size_slider.setRange(1, 64)
@@ -638,21 +634,6 @@ class EditorWindow(QMainWindow):
         self.stroke_style_combo.currentIndexChanged.connect(self._stroke_style_changed)
         self._configure_compact_toolbar_height(self.stroke_style_combo)
         style_layout.addWidget(self.stroke_style_combo)
-        style_layout.addWidget(self._create_toolbar_label("Blur"))
-        self.blur_block_spin = QSpinBox()
-        self.blur_block_spin.setRange(4, 64)
-        self.blur_block_spin.setValue(self.canvas.blur_block_size())
-        self.blur_block_spin.valueChanged.connect(self._blur_block_size_changed)
-        self._configure_compact_toolbar_height(self.blur_block_spin)
-        style_layout.addWidget(self.blur_block_spin)
-        style_layout.addWidget(self._create_toolbar_label("Magic Wand"))
-        self.wand_tolerance_spin = QSpinBox()
-        self.wand_tolerance_spin.setRange(0, 255)
-        self.wand_tolerance_spin.setValue(self.canvas.wand_tolerance())
-        self.wand_tolerance_spin.setToolTip("Magic Wand color tolerance")
-        self.wand_tolerance_spin.valueChanged.connect(self._wand_tolerance_changed)
-        self._configure_compact_toolbar_height(self.wand_tolerance_spin)
-        style_layout.addWidget(self.wand_tolerance_spin)
         style_layout.addStretch(1)
         self._property_tabs.addTab(style_tab, "Style")
 
@@ -1243,15 +1224,10 @@ class EditorWindow(QMainWindow):
         for tool_key, button in self._tool_buttons.items():
             button.setToolTip(self._tool_tooltip_text(tool_key))
 
-        self.apply_crop_button.setToolTip("Apply current crop selection.")
         self.stroke_size_slider.setToolTip(
             "Stroke / brush thickness in pixels (also used by Rectangle, Line, and Brush)."
         )
         self.stroke_style_combo.setToolTip("Select line style for lines and arrows.")
-        self.blur_block_spin.setToolTip("Set blur pixel block size for redaction.")
-        self.wand_tolerance_spin.setToolTip(
-            "Magic Wand color tolerance (0–255). Higher values select a wider color range."
-        )
         self.text_style_combo.setToolTip("Select plain text, text box, or speech bubble.")
         self.stroke_button.setToolTip("Open border color picker.")
         self.fill_button.setToolTip("Open background color picker.")
@@ -1634,6 +1610,32 @@ class EditorWindow(QMainWindow):
             button.setFixedSize(40, 28)
 
         wand_menu = QMenu(self)
+        tolerance_action = QWidgetAction(wand_menu)
+        tolerance_row = QWidget(wand_menu)
+        tolerance_layout = QHBoxLayout(tolerance_row)
+        tolerance_layout.setContentsMargins(10, 8, 10, 8)
+        tolerance_layout.setSpacing(8)
+        tolerance_title = QLabel("Tolerance", tolerance_row)
+        tolerance_title.setToolTip(
+            "Magic Wand color tolerance (0–255). Higher values select a wider color range."
+        )
+        tolerance_layout.addWidget(tolerance_title)
+        self.wand_tolerance_slider = QSlider(Qt.Orientation.Horizontal, tolerance_row)
+        self.wand_tolerance_slider.setRange(0, 255)
+        self.wand_tolerance_slider.setValue(self.canvas.wand_tolerance())
+        self.wand_tolerance_slider.setMinimumWidth(120)
+        self.wand_tolerance_slider.setToolTip(
+            "Magic Wand color tolerance (0–255). Higher values select a wider color range."
+        )
+        self.wand_tolerance_slider.valueChanged.connect(self._wand_tolerance_changed)
+        tolerance_layout.addWidget(self.wand_tolerance_slider, 1)
+        self.wand_tolerance_label = QLabel(str(self.canvas.wand_tolerance()), tolerance_row)
+        self.wand_tolerance_label.setMinimumWidth(28)
+        self.wand_tolerance_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tolerance_layout.addWidget(self.wand_tolerance_label)
+        tolerance_action.setDefaultWidget(tolerance_row)
+        wand_menu.addAction(tolerance_action)
+        wand_menu.addSeparator()
         wand_menu.addAction(self.wand_contiguous_action)
         wand_menu.addSeparator()
         wand_menu.addAction(self.erase_transparent_action)
@@ -1642,6 +1644,48 @@ class EditorWindow(QMainWindow):
         wand_button.setMenu(wand_menu)
         wand_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         wand_button.setFixedSize(40, 28)
+
+        self._setup_blur_tool_option_menu()
+
+    def _setup_blur_tool_option_menu(self) -> None:
+        """
+        Attaches a Blur toolbar popup with the pixel-block size slider.
+
+        Returns:
+            None
+        """
+
+        blur_menu = QMenu(self)
+        blur_action = QWidgetAction(blur_menu)
+        row = QWidget(blur_menu)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(10, 8, 10, 8)
+        row_layout.setSpacing(8)
+        title = QLabel("Pixel block", row)
+        title.setToolTip(
+            "Blur pixel block size for redaction (larger = stronger pixelation)."
+        )
+        row_layout.addWidget(title)
+        self.blur_block_menu_slider = QSlider(Qt.Orientation.Horizontal, row)
+        self.blur_block_menu_slider.setRange(4, 64)
+        self.blur_block_menu_slider.setValue(self.canvas.blur_block_size())
+        self.blur_block_menu_slider.setMinimumWidth(120)
+        self.blur_block_menu_slider.setToolTip(
+            "Blur pixel block size for redaction (larger = stronger pixelation)."
+        )
+        self.blur_block_menu_slider.valueChanged.connect(self._blur_block_size_changed)
+        row_layout.addWidget(self.blur_block_menu_slider, 1)
+        self.blur_block_menu_label = QLabel(str(self.canvas.blur_block_size()), row)
+        self.blur_block_menu_label.setMinimumWidth(24)
+        self.blur_block_menu_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row_layout.addWidget(self.blur_block_menu_label)
+        blur_action.setDefaultWidget(row)
+        blur_menu.addAction(blur_action)
+
+        blur_button = self._tool_buttons[Tool.BLUR]
+        blur_button.setMenu(blur_menu)
+        blur_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        blur_button.setFixedSize(40, 28)
 
     def _popup_pixel_tool_options(self, tool: str) -> None:
         """
@@ -1749,14 +1793,23 @@ class EditorWindow(QMainWindow):
             self._clear_tool_lock()
 
         already_active = self._active_tool == tool
+        if (
+            tool == Tool.CROP
+            and already_active
+            and self.canvas.has_pending_crop()
+        ):
+            self.canvas.apply_pending_crop()
+            return
+
         self._set_tool(tool)
         self._one_shot_tool = tool if self._is_lockable_tool(tool) else None
-        # Re-clicking an active pixel tool opens its options popup immediately.
+        # Re-clicking an active option tool opens its popup immediately.
         if already_active and tool in {
             Tool.SELECT_RECT,
             Tool.SELECT_ELLIPSE,
             Tool.SELECT_PATH,
             Tool.MAGIC_WAND,
+            Tool.BLUR,
         }:
             self._popup_pixel_tool_options(tool)
 
@@ -2048,7 +2101,13 @@ class EditorWindow(QMainWindow):
             None
         """
 
-        self.canvas.set_blur_block_size(value)
+        resolved = max(4, min(64, int(value)))
+        self.canvas.set_blur_block_size(resolved)
+        if self.blur_block_menu_slider.value() != resolved:
+            self.blur_block_menu_slider.blockSignals(True)
+            self.blur_block_menu_slider.setValue(resolved)
+            self.blur_block_menu_slider.blockSignals(False)
+        self.blur_block_menu_label.setText(str(resolved))
 
     def _wand_tolerance_changed(self, value: int) -> None:
         """
@@ -2061,7 +2120,13 @@ class EditorWindow(QMainWindow):
             None
         """
 
-        self.canvas.set_wand_tolerance(value)
+        resolved = max(0, min(255, int(value)))
+        self.canvas.set_wand_tolerance(resolved)
+        if self.wand_tolerance_slider.value() != resolved:
+            self.wand_tolerance_slider.blockSignals(True)
+            self.wand_tolerance_slider.setValue(resolved)
+            self.wand_tolerance_slider.blockSignals(False)
+        self.wand_tolerance_label.setText(str(resolved))
 
     def _wand_contiguous_changed(self, checked: bool) -> None:
         """
@@ -2869,7 +2934,7 @@ class EditorWindow(QMainWindow):
 
     def _on_crop_state_changed(self, is_active: bool) -> None:
         """
-        Enables or disables crop apply button.
+        Shows guidance when a crop selection becomes available.
 
         Args:
             is_active: True when crop selection exists.
@@ -2878,7 +2943,11 @@ class EditorWindow(QMainWindow):
             None
         """
 
-        self.apply_crop_button.setEnabled(is_active)
+        if is_active:
+            self.statusBar().showMessage(
+                "Crop ready — press Enter or click Crop again to apply.",
+                5000,
+            )
 
     def _on_crop_applied(self) -> None:
         """

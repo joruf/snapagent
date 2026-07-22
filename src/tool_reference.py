@@ -73,11 +73,12 @@ TOOL_HELP_ENTRIES: tuple[ToolHelpEntry, ...] = (
     ToolHelpEntry(
         tool=Tool.MAGIC_WAND,
         name="Magic Wand",
-        tooltip_blurb="select similar colors; menu for Contiguous & erase",
+        tooltip_blurb="select similar colors; menu for tolerance & options",
+
         description=(
             "Selects connected or similar background pixels by color. "
-            "Adjust tolerance in the Style panel. Use the tool menu for Contiguous "
-            "and Delete erase mode. Hold Shift to add."
+            "Use the tool menu for Tolerance, Contiguous, and Delete erase mode. "
+            "Hold Shift to add."
         ),
         shortcut_hint="W",
     ),
@@ -143,8 +144,11 @@ TOOL_HELP_ENTRIES: tuple[ToolHelpEntry, ...] = (
     ToolHelpEntry(
         tool=Tool.BLUR,
         name="Blur",
-        tooltip_blurb="drag a rectangle to pixelate/redact",
-        description="Pixelates a dragged rectangle to hide sensitive content.",
+        tooltip_blurb="pixelate/redact; menu sets pixel block size",
+        description=(
+            "Pixelates a dragged rectangle to hide sensitive content. "
+            "Open the tool menu to set the pixel block size."
+        ),
     ),
     ToolHelpEntry(
         tool=Tool.STEP,
@@ -161,8 +165,11 @@ TOOL_HELP_ENTRIES: tuple[ToolHelpEntry, ...] = (
     ToolHelpEntry(
         tool=Tool.CROP,
         name="Crop",
-        tooltip_blurb="select area; Enter applies, Esc cancels",
-        description="Selects a crop area on the canvas. Press Enter to apply or Esc to cancel.",
+        tooltip_blurb="select area; Enter or Crop click applies, Esc cancels",
+        description=(
+            "Selects a crop area on the canvas. Press Enter or click Crop again to apply, "
+            "or Esc to cancel."
+        ),
     ),
 )
 
