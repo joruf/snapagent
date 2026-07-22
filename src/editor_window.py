@@ -448,6 +448,7 @@ class EditorWindow(QMainWindow):
         strip_layout.addWidget(self.history_redo_button)
         self.history_list_combo = QComboBox()
         self.history_list_combo.setMinimumWidth(160)
+        self.history_list_combo.setMaxVisibleItems(16)
         self.history_list_combo.currentIndexChanged.connect(self._on_history_entry_selected)
         self._configure_compact_toolbar_height(self.history_list_combo)
         strip_layout.addWidget(self.history_list_combo)
@@ -1010,6 +1011,8 @@ class EditorWindow(QMainWindow):
 
         widget.setFixedHeight(height)
         widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        if isinstance(widget, QComboBox):
+            widget.setMaxVisibleItems(16)
 
     def _create_toolbar_label(self, text: str) -> QLabel:
         """
