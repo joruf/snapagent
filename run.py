@@ -44,6 +44,7 @@ from src.config import (
     POST_CAPTURE_SAVE,
     AppConfig,
     ConfigManager,
+    normalize_export_preset,
 )
 from src.constants import ABOUT_GITHUB, APP_FILE_EXTENSION, APP_NAME
 from src.theme import (
@@ -738,6 +739,8 @@ class AppController:
         self.config = dialog.build_config()
         self.config_manager.save(self.config)
         self._apply_hotkeys()
+        for editor in list(self.editors):
+            editor.set_auto_crop_on_shrink(self.config.auto_crop_on_shrink)
 
     def _capture_save_directory(self) -> Path:
         """
@@ -916,6 +919,72 @@ class AppController:
             return
         self._apply_theme(theme_name, persist=True)
 
+    def _on_editor_export_preset_changed(self, preset_key: str) -> None:
+        """
+        Persists the last selected export preset from any editor tab.
+
+        Args:
+            preset_key: Newly selected export preset key.
+
+        Returns:
+            None
+        """
+
+        normalized = normalize_export_preset(preset_key)
+        if normalized == self.config.export_preset:
+            return
+        self.config.export_preset = normalized
+        self.config_manager.save(self.config)
+
+    def _on_editor_batch_profiles_changed(
+        self,
+        profiles: object,
+        selected_key: str,
+    ) -> None:
+        """
+        Persists named batch export profiles and active selection.
+
+        Args:
+            profiles: Updated profile list payload.
+            selected_key: Active profile key.
+
+        Returns:
+            None
+        """
+
+        if not isinstance(profiles, list):
+            return
+        self.config.batch_export_profiles = [
+            dict(profile)
+            for profile in profiles
+            if isinstance(profile, dict)
+        ]
+        self.config.batch_export_profile_key = selected_key.strip().lower()
+        self.config_manager.save(self.config)
+        for editor in list(self.editors):
+            try:
+                editor.set_batch_export_profiles(
+                    self.config.batch_export_profiles,
+                    selected_key=self.config.batch_export_profile_key,
+                    emit_signal=False,
+                )
+            except RuntimeError:
+                continue
+
+    def _on_editor_batch_export_directory_changed(self, directory_path: str) -> None:
+        """
+        Persists the last used batch export output directory.
+
+        Args:
+            directory_path: Selected output directory path.
+
+        Returns:
+            None
+        """
+
+        self.config.batch_export_last_directory = directory_path.strip()
+        self.config_manager.save(self.config)
+
     def _apply_capture_taskbar_identity(self) -> None:
         """
         Applies blue capture identity for the taskbar and app icon.
@@ -999,7 +1068,25 @@ class AppController:
         editor = EditorWindow(screenshot)
         editor.set_recovery_path(recovery_path or create_tab_recovery_path())
         editor.set_theme_selection(self.config.theme)
+        editor.set_export_preset(self.config.export_preset, emit_signal=False)
+        editor.set_auto_crop_on_shrink(self.config.auto_crop_on_shrink)
+        editor.set_batch_export_profiles(
+            self.config.batch_export_profiles,
+            selected_key=self.config.batch_export_profile_key,
+            emit_signal=False,
+        )
+        editor.set_batch_export_last_directory(
+            self.config.batch_export_last_directory,
+            emit_signal=False,
+        )
         editor.theme_changed.connect(self.set_theme)
+        editor.export_preset_changed.connect(self._on_editor_export_preset_changed)
+        editor.batch_export_profiles_changed.connect(
+            self._on_editor_batch_profiles_changed
+        )
+        editor.batch_export_last_directory_changed.connect(
+            self._on_editor_batch_export_directory_changed
+        )
         editor.settings_requested.connect(self.show_settings_dialog)
         editor.new_canvas_requested.connect(
             lambda: self.create_new_canvas_tab(editor),
@@ -1431,6 +1518,12 @@ class AppController:
         tab_widget = self.editor_tabs.widget(index)
         if tab_widget is None:
             return
+        if not self._is_quitting:
+            try:
+                if hasattr(tab_widget, "confirm_close_if_needed") and not tab_widget.confirm_close_if_needed():
+                    return
+            except RuntimeError:
+                return
         self.editor_tabs.removeTab(index)
         if tab_widget in self.editors:
             self.editors.remove(tab_widget)
@@ -1620,7 +1713,7 @@ def main() -> int:
     runtime_code = _ensure_qt_runtime()
     if runtime_code != 0:
         return runtime_code
-    cli_commands = {"capture", "pick-color", "export", "open"}
+    cli_commands = {"capture", "pick-color", "export", "batch-export", "open"}
     if len(sys.argv) > 1 and sys.argv[1] in cli_commands:
         from src.cli import run_cli
 

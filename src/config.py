@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from src.theme import DEFAULT_THEME, normalize_theme_name
 
@@ -40,6 +41,45 @@ EDITOR_LAST_TAB_BEHAVIORS = {
     EDITOR_LAST_TAB_KEEP_OPEN: "Keep editor window open",
     EDITOR_LAST_TAB_CLOSE_WINDOW: "Close editor window",
 }
+
+EXPORT_PRESET_WEB = "web"
+EXPORT_PRESET_DOCS = "docs"
+EXPORT_PRESET_PRINT = "print"
+EXPORT_PRESET_LIGHTWEIGHT = "lightweight"
+DEFAULT_EXPORT_PRESET = EXPORT_PRESET_DOCS
+VALID_EXPORT_PRESETS = frozenset(
+    {
+        EXPORT_PRESET_WEB,
+        EXPORT_PRESET_DOCS,
+        EXPORT_PRESET_PRINT,
+        EXPORT_PRESET_LIGHTWEIGHT,
+    }
+)
+
+DEFAULT_BATCH_EXPORT_PROFILES: list[dict[str, Any]] = [
+    {
+        "key": "web_fast",
+        "label": "Web Fast",
+        "formats": ["png", "jpg"],
+        "jpg_quality": 82,
+        "pdf_dpi": 150,
+    },
+    {
+        "key": "docs_hq",
+        "label": "Docs HQ",
+        "formats": ["png", "jpg", "pdf"],
+        "jpg_quality": 90,
+        "pdf_dpi": 300,
+    },
+    {
+        "key": "print_master",
+        "label": "Print Master",
+        "formats": ["png", "jpg", "pdf"],
+        "jpg_quality": 96,
+        "pdf_dpi": 600,
+    },
+]
+DEFAULT_BATCH_EXPORT_PROFILE_KEY = "docs_hq"
 
 DEFAULT_HOTKEY_CAPTURE_REGION = "ctrl+shift+a"
 DEFAULT_HOTKEY_CAPTURE_WINDOW = "ctrl+shift+w"
@@ -93,6 +133,76 @@ def normalize_editor_last_tab_behavior(behavior: str) -> str:
     return DEFAULT_EDITOR_LAST_TAB_BEHAVIOR
 
 
+def normalize_export_preset(preset: str) -> str:
+    """
+    Returns a supported export preset identifier.
+
+    Args:
+        preset: Requested export preset identifier.
+
+    Returns:
+        str: Valid export preset.
+    """
+
+    normalized = preset.strip().lower()
+    if normalized in VALID_EXPORT_PRESETS:
+        return normalized
+    return DEFAULT_EXPORT_PRESET
+
+
+def normalize_batch_export_profiles(
+    profiles: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+) -> list[dict[str, Any]]:
+    """
+    Normalizes batch export profile definitions.
+
+    Args:
+        profiles: Raw profile objects from configuration.
+
+    Returns:
+        list[dict[str, Any]]: Sanitized profile list.
+    """
+
+    normalized: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for index, profile in enumerate(list(profiles or [])):
+        if not isinstance(profile, dict):
+            continue
+        raw_key = str(profile.get("key", "")).strip().lower()
+        key = "".join(
+            character if character.isalnum() or character == "_" else "_"
+            for character in raw_key
+        ).strip("_")
+        if not key:
+            key = f"profile_{index + 1}"
+        if key in seen_keys:
+            continue
+        label = str(profile.get("label", "")).strip() or key.replace("_", " ").title()
+        formats = [
+            str(value).strip().lower()
+            for value in list(profile.get("formats", []))
+            if str(value).strip().lower() in {"png", "jpg", "pdf"}
+        ]
+        if not formats:
+            formats = ["png"]
+        jpg_quality = max(1, min(100, int(profile.get("jpg_quality", 90))))
+        pdf_dpi = max(72, min(1200, int(profile.get("pdf_dpi", 300))))
+        normalized.append(
+            {
+                "key": key,
+                "label": label,
+                "formats": formats,
+                "jpg_quality": jpg_quality,
+                "pdf_dpi": pdf_dpi,
+            }
+        )
+        seen_keys.add(key)
+
+    if normalized:
+        return normalized
+    return [dict(profile) for profile in DEFAULT_BATCH_EXPORT_PROFILES]
+
+
 @dataclass(slots=True)
 class AppConfig:
     """
@@ -108,6 +218,11 @@ class AppConfig:
         post_capture_action: Action after a successful capture.
         capture_save_directory: Optional folder for automatic capture saves.
         editor_last_tab_behavior: Behavior when the last editor tab is closed.
+        export_preset: Preferred export quality preset.
+        batch_export_profiles: Saved named batch export profiles.
+        batch_export_profile_key: Active batch export profile key.
+        batch_export_last_directory: Last used batch export output directory.
+        auto_crop_on_shrink: Whether unused canvas margins are cropped automatically.
     """
 
     autostart_enabled: bool = False
@@ -119,6 +234,32 @@ class AppConfig:
     post_capture_action: str = DEFAULT_POST_CAPTURE_ACTION
     capture_save_directory: str = ""
     editor_last_tab_behavior: str = DEFAULT_EDITOR_LAST_TAB_BEHAVIOR
+    export_preset: str = DEFAULT_EXPORT_PRESET
+    batch_export_profiles: list[dict[str, Any]] = None
+    batch_export_profile_key: str = DEFAULT_BATCH_EXPORT_PROFILE_KEY
+    batch_export_last_directory: str = ""
+    auto_crop_on_shrink: bool = True
+
+    def __post_init__(self) -> None:
+        """
+        Initializes mutable defaults after dataclass construction.
+
+        Returns:
+            None
+        """
+
+        if self.batch_export_profiles is None:
+            self.batch_export_profiles = [
+                dict(profile) for profile in DEFAULT_BATCH_EXPORT_PROFILES
+            ]
+        profile_keys = {
+            str(profile.get("key", "")).strip().lower()
+            for profile in self.batch_export_profiles
+            if isinstance(profile, dict)
+        }
+        normalized_key = str(self.batch_export_profile_key).strip().lower()
+        if normalized_key not in profile_keys:
+            self.batch_export_profile_key = next(iter(profile_keys), DEFAULT_BATCH_EXPORT_PROFILE_KEY)
 
 
 class ConfigManager:
@@ -180,6 +321,21 @@ class ConfigManager:
                     )
                 )
             ),
+            export_preset=normalize_export_preset(
+                str(payload.get("export_preset", DEFAULT_EXPORT_PRESET))
+            ),
+            batch_export_profiles=normalize_batch_export_profiles(
+                payload.get("batch_export_profiles")
+                if isinstance(payload.get("batch_export_profiles"), list)
+                else None
+            ),
+            batch_export_profile_key=str(
+                payload.get("batch_export_profile_key", DEFAULT_BATCH_EXPORT_PROFILE_KEY)
+            ).strip().lower(),
+            batch_export_last_directory=str(
+                payload.get("batch_export_last_directory", "")
+            ).strip(),
+            auto_crop_on_shrink=bool(payload.get("auto_crop_on_shrink", True)),
         )
 
     def save(self, config: AppConfig) -> None:
@@ -208,6 +364,13 @@ class ConfigManager:
             "editor_last_tab_behavior": normalize_editor_last_tab_behavior(
                 config.editor_last_tab_behavior
             ),
+            "export_preset": normalize_export_preset(config.export_preset),
+            "batch_export_profiles": normalize_batch_export_profiles(
+                config.batch_export_profiles
+            ),
+            "batch_export_profile_key": str(config.batch_export_profile_key).strip().lower(),
+            "batch_export_last_directory": config.batch_export_last_directory.strip(),
+            "auto_crop_on_shrink": bool(config.auto_crop_on_shrink),
         }
         self.config_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=True),

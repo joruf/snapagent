@@ -5,6 +5,7 @@ Editable screenshot canvas for Snappix.
 from __future__ import annotations
 
 import base64
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,9 @@ from PySide6.QtCore import (
     QIODevice,
     QPoint,
     QPointF,
+    QRect,
     QRectF,
+    QSizeF,
     Qt,
     QTimer,
     Signal,
@@ -27,6 +30,7 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QContextMenuEvent,
+    QFont,
     QGuiApplication,
     QImage,
     QKeySequence,
@@ -58,6 +62,8 @@ from PySide6.QtWidgets import (
 
 from src.annotation_items import (
     ArrowItem,
+    ITEM_ROLE_ID,
+    ITEM_ROLE_LOCKED,
     ITEM_ROLE_TYPE,
     STROKE_STYLE_DASH,
     STROKE_STYLE_DASH_DOT,
@@ -183,6 +189,10 @@ class EditorCanvas(QGraphicsView):
         self.setFrameShape(QGraphicsView.Shape.NoFrame)
 
         self._document_rect = QRectF()
+        self._base_content_origin = QPointF(0.0, 0.0)
+        self._base_content_size = QSizeF(0.0, 0.0)
+        self._fitting_document = False
+        self._auto_crop_on_shrink = True
         self._workspace_item = QGraphicsRectItem()
         self._workspace_item.setZValue(-2000)
         self._workspace_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
@@ -211,6 +221,10 @@ class EditorCanvas(QGraphicsView):
             font_bold=False,
             font_italic=False,
             font_underline=False,
+            letter_spacing=0.0,
+            line_spacing_factor=1.2,
+            box_padding=10.0,
+            corner_radius=6.0,
             stroke_style=STROKE_STYLE_SOLID,
             text_style=TEXT_STYLE_PLAIN,
         )
@@ -232,6 +246,7 @@ class EditorCanvas(QGraphicsView):
         self._step_counter_overridden = False
         self._alignment_threshold = 8.0
         self._alignment_guides: list[QLineF] = []
+        self._alignment_labels: list[tuple[str, QPointF]] = []
         self._blank_document = False
 
         self._background_item = QGraphicsPixmapItem()
@@ -406,9 +421,98 @@ class EditorCanvas(QGraphicsView):
         self._background_item.setPixmap(pixmap)
         self._background_item.setPos(0, 0)
         self._document_rect = QRectF(pixmap.rect())
+        self._reset_base_content_to_document()
         self._update_workspace_layout()
         self._initial_view_pending = True
         QTimer.singleShot(0, self._apply_initial_screenshot_view)
+
+    def _set_screenshot_without_view_reset(
+        self,
+        pixmap: QPixmap,
+        *,
+        reset_base_content: bool = False,
+    ) -> None:
+        """
+        Replaces screenshot pixels without changing current zoom view state.
+
+        Args:
+            pixmap: New screenshot image.
+            reset_base_content: True to reset intrinsic screenshot bounds to full image.
+
+        Returns:
+            None
+        """
+
+        self._background_item.setPixmap(pixmap)
+        self._background_item.setPos(0, 0)
+        self._document_rect = QRectF(pixmap.rect())
+        if reset_base_content:
+            self._reset_base_content_to_document()
+        self._update_workspace_layout()
+
+    def _reset_base_content_to_document(self) -> None:
+        """
+        Resets intrinsic screenshot bounds to the current document rectangle.
+
+        Returns:
+            None
+        """
+
+        self._base_content_origin = QPointF(self._document_rect.topLeft())
+        self._base_content_size = QSizeF(self._document_rect.size())
+
+    def _base_content_rect(self) -> QRectF:
+        """
+        Returns the intrinsic screenshot rectangle in scene coordinates.
+
+        Returns:
+            QRectF: Base screenshot bounds used for auto-crop shrink.
+        """
+
+        if self._base_content_size.width() <= 0.0 or self._base_content_size.height() <= 0.0:
+            return QRectF(self.document_rect())
+        return QRectF(self._base_content_origin, self._base_content_size)
+
+    def base_content_payload(self) -> dict[str, float]:
+        """
+        Serializes intrinsic screenshot bounds for history snapshots.
+
+        Returns:
+            dict[str, float]: Origin and size of the base screenshot area.
+        """
+
+        rect = self._base_content_rect()
+        return {
+            "x": float(rect.x()),
+            "y": float(rect.y()),
+            "width": float(rect.width()),
+            "height": float(rect.height()),
+        }
+
+    def restore_base_content_payload(self, payload: dict[str, Any] | None) -> None:
+        """
+        Restores intrinsic screenshot bounds from a history snapshot.
+
+        Args:
+            payload: Serialized base-content rectangle, or None to reset.
+
+        Returns:
+            None
+        """
+
+        if not isinstance(payload, dict):
+            self._reset_base_content_to_document()
+            return
+        width = float(payload.get("width", 0.0) or 0.0)
+        height = float(payload.get("height", 0.0) or 0.0)
+        if width <= 0.0 or height <= 0.0:
+            self._reset_base_content_to_document()
+            return
+        self._base_content_origin = QPointF(
+            float(payload.get("x", 0.0) or 0.0),
+            float(payload.get("y", 0.0) or 0.0),
+        )
+        self._base_content_size = QSizeF(width, height)
 
     def resizeEvent(self, event) -> None:
         """
@@ -482,6 +586,7 @@ class EditorCanvas(QGraphicsView):
         QApplication.restoreOverrideCursor()
         self._apply_tool_cursor(tool)
         self._alignment_guides.clear()
+        self._alignment_labels.clear()
         self.viewport().update()
         if tool == Tool.SELECT:
             self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
@@ -513,7 +618,10 @@ class EditorCanvas(QGraphicsView):
             None
         """
 
-        self._last_action_label = action_label.strip() or "Edit"
+        resolved_label = action_label.strip() or "Edit"
+        if not self._fitting_document and self._fit_document_to_content():
+            resolved_label = "Resize canvas to fit content"
+        self._last_action_label = resolved_label
         self.content_changed.emit()
         if self._selected_annotation_items():
             self._refresh_selection_info()
@@ -548,6 +656,9 @@ class EditorCanvas(QGraphicsView):
         rect = self._item_scene_rect(item)
         payload: dict[str, Any] = {
             "type": annotation_type,
+            "layer_id": str(item.data(ITEM_ROLE_ID) or ""),
+            "locked": bool(item.data(ITEM_ROLE_LOCKED) or False),
+            "visible": bool(item.isVisible()),
             "x": round(rect.x(), 1),
             "y": round(rect.y(), 1),
             "width": round(rect.width(), 1),
@@ -576,6 +687,10 @@ class EditorCanvas(QGraphicsView):
                 payload["font_bold"] = item._font.bold()
                 payload["font_italic"] = item._font.italic()
                 payload["font_underline"] = item._font.underline()
+                payload["letter_spacing"] = item.letter_spacing()
+                payload["line_spacing_factor"] = item.line_spacing_factor()
+                payload["box_padding"] = item.box_padding()
+                payload["corner_radius"] = item.corner_radius()
             else:
                 payload["stroke_rgba"] = color_to_list(item.defaultTextColor())
                 payload["text_rgba"] = color_to_list(item.defaultTextColor())
@@ -585,6 +700,8 @@ class EditorCanvas(QGraphicsView):
                 payload["font_bold"] = item.font().bold()
                 payload["font_italic"] = item.font().italic()
                 payload["font_underline"] = item.font().underline()
+                payload["letter_spacing"] = float(item.font().letterSpacing())
+                payload["text_style"] = TEXT_STYLE_PLAIN
         elif annotation_type == "image":
             payload["stroke_width"] = 0.0
         elif annotation_type == "step" and isinstance(item, StepBadgeItem):
@@ -642,6 +759,10 @@ class EditorCanvas(QGraphicsView):
         font_bold: bool | None = None,
         font_italic: bool | None = None,
         font_underline: bool | None = None,
+        letter_spacing: float | None = None,
+        line_spacing_factor: float | None = None,
+        box_padding: float | None = None,
+        corner_radius: float | None = None,
         stroke_style: str | None = None,
         text_style: str | None = None,
     ) -> None:
@@ -658,6 +779,10 @@ class EditorCanvas(QGraphicsView):
             font_bold: Optional bold state for text.
             font_italic: Optional italic state for text.
             font_underline: Optional underline state for text.
+            letter_spacing: Optional letter spacing in pixels.
+            line_spacing_factor: Optional line-spacing multiplier.
+            box_padding: Optional text container padding in pixels.
+            corner_radius: Optional text container corner radius in pixels.
 
         Returns:
             None
@@ -681,6 +806,14 @@ class EditorCanvas(QGraphicsView):
             self._style.font_italic = bool(font_italic)
         if font_underline is not None:
             self._style.font_underline = bool(font_underline)
+        if letter_spacing is not None:
+            self._style.letter_spacing = float(letter_spacing)
+        if line_spacing_factor is not None:
+            self._style.line_spacing_factor = max(0.7, float(line_spacing_factor))
+        if box_padding is not None:
+            self._style.box_padding = max(0.0, float(box_padding))
+        if corner_radius is not None:
+            self._style.corner_radius = max(0.0, float(corner_radius))
         if stroke_style is not None:
             self._style.stroke_style = normalize_stroke_style(stroke_style)
         if text_style is not None:
@@ -689,6 +822,8 @@ class EditorCanvas(QGraphicsView):
         changed = False
         for item in self._scene.selectedItems():
             annotation_type = str(item.data(ITEM_ROLE_TYPE) or "")
+            if bool(item.data(ITEM_ROLE_LOCKED) or False):
+                continue
             if annotation_type in {"rect", "ellipse"}:
                 shape_item = item
                 if stroke_color is not None:
@@ -734,6 +869,18 @@ class EditorCanvas(QGraphicsView):
                     if font_underline is not None:
                         font.setUnderline(bool(font_underline))
                     item.set_font(font)
+                if (
+                    letter_spacing is not None
+                    or line_spacing_factor is not None
+                    or box_padding is not None
+                    or corner_radius is not None
+                ):
+                    item.set_layout_options(
+                        letter_spacing=letter_spacing,
+                        line_spacing_factor=line_spacing_factor,
+                        box_padding=box_padding,
+                        corner_radius=corner_radius,
+                    )
                 changed = True
             elif annotation_type == "text":
                 text_item = item
@@ -760,6 +907,13 @@ class EditorCanvas(QGraphicsView):
                 if font_underline is not None:
                     font = text_item.font()
                     font.setUnderline(bool(font_underline))
+                    text_item.setFont(font)
+                if letter_spacing is not None:
+                    font = text_item.font()
+                    font.setLetterSpacing(
+                        QFont.SpacingType.AbsoluteSpacing,
+                        float(letter_spacing),
+                    )
                     text_item.setFont(font)
                 changed = True
         if changed:
@@ -792,6 +946,7 @@ class EditorCanvas(QGraphicsView):
 
         self._snap_enabled = bool(enabled)
         self._alignment_guides.clear()
+        self._alignment_labels.clear()
         self.viewport().update()
 
     def set_grid_size(self, size: int) -> None:
@@ -879,6 +1034,10 @@ class EditorCanvas(QGraphicsView):
                         fill_color=QColor(self._style.fill_color),
                         stroke_color=QColor(self._style.stroke_color),
                         stroke_width=self._style.stroke_width,
+                        letter_spacing=self._style.letter_spacing,
+                        line_spacing_factor=self._style.line_spacing_factor,
+                        box_padding=self._style.box_padding,
+                        corner_radius=self._style.corner_radius,
                     )
                     item.setPos(scene_pos)
                     self._scene.addItem(item)
@@ -891,6 +1050,10 @@ class EditorCanvas(QGraphicsView):
                     font.setBold(self._style.font_bold)
                     font.setItalic(self._style.font_italic)
                     font.setUnderline(self._style.font_underline)
+                    font.setLetterSpacing(
+                        QFont.SpacingType.AbsoluteSpacing,
+                        self._style.letter_spacing,
+                    )
                     item.setFont(font)
                     item.setPos(scene_pos)
                     item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
@@ -1038,6 +1201,15 @@ class EditorCanvas(QGraphicsView):
             current = self.mapToScene(event.position().toPoint())
             self._update_preview_item(self._start_scene_pos, current)
             return
+        if (
+            self._tool == Tool.SELECT
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            self._preview_alignment_guides_for_selection()
+        else:
+            if self._alignment_labels:
+                self._alignment_labels.clear()
+                self.viewport().update()
         self._sync_resize_overlay_with_target()
         super().mouseMoveEvent(event)
 
@@ -1097,8 +1269,14 @@ class EditorCanvas(QGraphicsView):
             self._emit_content_changed(draw_names.get(self._tool, "Draw annotation"))
             return
         super().mouseReleaseEvent(event)
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and self._tool == Tool.SELECT:
             self._snap_selected_items_with_alignment()
+            if self._fit_document_to_content():
+                self._emit_content_changed("Resize canvas to fit content")
+                return
+            if self._selected_annotation_items():
+                self._emit_content_changed("Move selection")
+                return
         self._sync_resize_overlay_with_target()
         self._refresh_selection_info()
 
@@ -1417,6 +1595,9 @@ class EditorCanvas(QGraphicsView):
                     text=annotation.text,
                     font_size=annotation.font_size,
                     font_family=annotation.font_family,
+                    font_bold=bool(annotation.font_bold),
+                    font_italic=bool(annotation.font_italic),
+                    font_underline=bool(annotation.font_underline),
                     payload=dict(annotation.payload),
                 )
             )
@@ -1601,6 +1782,10 @@ class EditorCanvas(QGraphicsView):
                 font.setBold(self._style.font_bold)
                 font.setItalic(self._style.font_italic)
                 font.setUnderline(self._style.font_underline)
+                font.setLetterSpacing(
+                    QFont.SpacingType.AbsoluteSpacing,
+                    self._style.letter_spacing,
+                )
                 text_item.setFont(font)
                 text_item.setPos(scene_pos)
                 text_item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
@@ -1639,6 +1824,28 @@ class EditorCanvas(QGraphicsView):
         ):
             if self.resize_selected_items(0.9):
                 return
+        if event.modifiers() in {
+            Qt.KeyboardModifier.NoModifier,
+            Qt.KeyboardModifier.ShiftModifier,
+        } and event.key() in {
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+        }:
+            step = 10.0 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
+            dx = 0.0
+            dy = 0.0
+            if event.key() == Qt.Key.Key_Left:
+                dx = -step
+            elif event.key() == Qt.Key.Key_Right:
+                dx = step
+            elif event.key() == Qt.Key.Key_Up:
+                dy = -step
+            elif event.key() == Qt.Key.Key_Down:
+                dy = step
+            if self.nudge_selected_items(dx, dy):
+                return
         if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter} and self.has_pending_crop():
             self.apply_pending_crop()
             return
@@ -1656,6 +1863,8 @@ class EditorCanvas(QGraphicsView):
                 if item is self._crop_item:
                     self.cancel_crop()
                     removed = True
+                    continue
+                if bool(item.data(ITEM_ROLE_LOCKED) or False):
                     continue
                 self._scene.removeItem(item)
                 removed = True
@@ -1680,6 +1889,8 @@ class EditorCanvas(QGraphicsView):
         changed = False
         for item in self._scene.selectedItems():
             if item in self._non_annotation_scene_items():
+                continue
+            if bool(item.data(ITEM_ROLE_LOCKED) or False):
                 continue
             if self._resize_item_geometry(item, scale_factor):
                 changed = True
@@ -1756,6 +1967,128 @@ class EditorCanvas(QGraphicsView):
             return True
 
         return False
+
+    def set_auto_crop_on_shrink(self, enabled: bool) -> None:
+        """
+        Enables or disables automatic crop when content becomes smaller.
+
+        Expanding the canvas for overflow always remains active.
+
+        Args:
+            enabled: True to crop unused margins automatically.
+
+        Returns:
+            None
+        """
+
+        self._auto_crop_on_shrink = bool(enabled)
+
+    def auto_crop_on_shrink(self) -> bool:
+        """
+        Returns whether unused canvas margins are cropped automatically.
+
+        Returns:
+            bool: True when shrink auto-crop is enabled.
+        """
+
+        return bool(self._auto_crop_on_shrink)
+
+    def _content_bounds_rect(self) -> QRectF:
+        """
+        Computes the tight scene bounds around screenshot base and annotations.
+
+        Returns:
+            QRectF: Normalized content bounds used for auto-crop.
+        """
+
+        bounds = QRectF(self._base_content_rect())
+        for item in self._annotation_items():
+            item_bounds = self._item_scene_rect(item).normalized()
+            if item_bounds.width() <= 0.0 or item_bounds.height() <= 0.0:
+                continue
+            if bounds.width() <= 0.0 or bounds.height() <= 0.0:
+                bounds = QRectF(item_bounds)
+            else:
+                bounds = bounds.united(item_bounds)
+        return bounds.normalized()
+
+    def _fit_document_to_content(self) -> bool:
+        """
+        Crops the document so its frame tightly wraps screenshot and drawings.
+
+        Expanding for overflow is always applied. Shrinking unused margins is
+        applied only when auto-crop-on-shrink is enabled.
+
+        Returns:
+            bool: True when the document geometry changed.
+        """
+
+        if self._fitting_document or self.has_pending_crop():
+            return False
+
+        content_bounds = self._content_bounds_rect()
+        if content_bounds.width() < 1.0 or content_bounds.height() < 1.0:
+            return False
+
+        crop_rect = QRect(content_bounds.toAlignedRect())
+        if crop_rect.width() < 1:
+            crop_rect.setWidth(1)
+        if crop_rect.height() < 1:
+            crop_rect.setHeight(1)
+
+        current_rect = self.document_rect().toAlignedRect()
+        if (
+            crop_rect.x() == 0
+            and crop_rect.y() == 0
+            and crop_rect.width() == current_rect.width()
+            and crop_rect.height() == current_rect.height()
+        ):
+            return False
+
+        document_bounds = QRect(0, 0, current_rect.width(), current_rect.height())
+        needs_expand = not document_bounds.contains(crop_rect)
+        if not needs_expand and not self._auto_crop_on_shrink:
+            return False
+
+        screenshot = self.screenshot()
+        if screenshot.isNull():
+            return False
+
+        self._fitting_document = True
+        try:
+            fitted = QImage(crop_rect.size(), QImage.Format.Format_ARGB32)
+            fitted.fill(self._background_base_color())
+            painter = QPainter(fitted)
+            painter.drawPixmap(-crop_rect.x(), -crop_rect.y(), screenshot)
+            painter.end()
+
+            shift = QPointF(float(-crop_rect.x()), float(-crop_rect.y()))
+            self._set_screenshot_without_view_reset(
+                QPixmap.fromImage(fitted),
+                reset_base_content=False,
+            )
+            self._base_content_origin = QPointF(
+                self._base_content_origin.x() + shift.x(),
+                self._base_content_origin.y() + shift.y(),
+            )
+
+            if shift.x() != 0.0 or shift.y() != 0.0:
+                for item in self._annotation_items():
+                    item.setPos(item.pos() + shift)
+                if self._crop_item is not None and self._crop_item.scene() is self._scene:
+                    self._crop_item.setPos(self._crop_item.pos() + shift)
+                    self._update_crop_shade()
+                if (
+                    self._resize_overlay_item is not None
+                    and self._resize_overlay_item.scene() is self._scene
+                ):
+                    self._resize_overlay_item.setPos(self._resize_overlay_item.pos() + shift)
+
+            self._sync_resize_overlay_with_target()
+            self.viewport().update()
+            return True
+        finally:
+            self._fitting_document = False
 
     def _background_base_color(self) -> QColor:
         """
@@ -1919,6 +2252,8 @@ class EditorCanvas(QGraphicsView):
             return
         max_z = max((item.zValue() for item in self._annotation_items()), default=0.0)
         for index, item in enumerate(selected):
+            if bool(item.data(ITEM_ROLE_LOCKED) or False):
+                continue
             item.setZValue(max_z + 1.0 + index)
         self._emit_content_changed("Bring to front")
 
@@ -1935,6 +2270,8 @@ class EditorCanvas(QGraphicsView):
             return
         min_z = min((item.zValue() for item in self._annotation_items()), default=0.0)
         for index, item in enumerate(selected):
+            if bool(item.data(ITEM_ROLE_LOCKED) or False):
+                continue
             item.setZValue(min_z - 1.0 - index)
         self._emit_content_changed("Send to back")
 
@@ -2003,9 +2340,14 @@ class EditorCanvas(QGraphicsView):
         selected = self._scene.selectedItems()
         if not selected:
             return
+        changed = False
         for item in selected:
+            if bool(item.data(ITEM_ROLE_LOCKED) or False):
+                continue
             item.setZValue(item.zValue() + delta)
-        self._emit_content_changed("Change layer order")
+            changed = True
+        if changed:
+            self._emit_content_changed("Change layer order")
 
     def _run_ocr_on_region(self, rect: QRectF) -> None:
         """
@@ -2287,6 +2629,89 @@ class EditorCanvas(QGraphicsView):
         self._sync_resize_overlay_with_target(item)
         self._emit_content_changed("Paste image")
 
+    def merge_canvas_payload(
+        self,
+        source_screenshot: QPixmap,
+        source_annotations: list[AnnotationModel],
+    ) -> bool:
+        """
+        Merges a copied tab canvas into the current tab as editable items.
+
+        Args:
+            source_screenshot: Screenshot image from the copied source tab.
+            source_annotations: Source tab annotations in source coordinates.
+
+        Returns:
+            bool: True when payload was merged successfully.
+        """
+
+        if source_screenshot.isNull():
+            return False
+
+        center_scene = self.mapToScene(self.viewport().rect().center())
+        target_top_left = QPointF(
+            center_scene.x() - (source_screenshot.width() / 2.0),
+            center_scene.y() - (source_screenshot.height() / 2.0),
+        )
+        target_top_left = self._snap_point_to_grid(target_top_left)
+
+        max_z = max(
+            (item.zValue() for item in self._annotation_items()),
+            default=0.0,
+        )
+        created_items: list[QGraphicsItem] = []
+
+        screenshot_model = AnnotationModel(
+            annotation_type="image",
+            x=target_top_left.x(),
+            y=target_top_left.y(),
+            width=float(source_screenshot.width()),
+            height=float(source_screenshot.height()),
+            stroke_rgba=[0, 0, 0, 0],
+            fill_rgba=[0, 0, 0, 0],
+            stroke_width=0.0,
+            payload={
+                "image_png_base64": encode_pixmap_to_base64(source_screenshot),
+                "z_index": max_z + 1.0,
+            },
+        )
+        screenshot_item = add_annotation_to_scene(self._scene, screenshot_model)
+        if screenshot_item is not None:
+            created_items.append(screenshot_item)
+
+        for index, annotation in enumerate(source_annotations, start=2):
+            merged_annotation = AnnotationModel(
+                annotation_type=annotation.annotation_type,
+                x=float(annotation.x + target_top_left.x()),
+                y=float(annotation.y + target_top_left.y()),
+                width=float(annotation.width),
+                height=float(annotation.height),
+                stroke_rgba=list(annotation.stroke_rgba),
+                fill_rgba=list(annotation.fill_rgba),
+                stroke_width=float(annotation.stroke_width),
+                text=str(annotation.text),
+                font_size=int(annotation.font_size),
+                font_family=str(annotation.font_family),
+                font_bold=bool(annotation.font_bold),
+                font_italic=bool(annotation.font_italic),
+                font_underline=bool(annotation.font_underline),
+                payload=copy.deepcopy(annotation.payload),
+            )
+            merged_annotation.payload["z_index"] = max_z + float(index)
+            merged_item = add_annotation_to_scene(self._scene, merged_annotation)
+            if merged_item is not None:
+                created_items.append(merged_item)
+
+        if not created_items:
+            return False
+
+        self._scene.clearSelection()
+        for item in created_items:
+            item.setSelected(True)
+        self._sync_resize_overlay_with_target()
+        self._emit_content_changed("Paste drawing area")
+        return True
+
     def _on_selection_changed(self) -> None:
         """
         Emits style details of the first selected item.
@@ -2298,11 +2723,15 @@ class EditorCanvas(QGraphicsView):
         selected = self._scene.selectedItems()
         if not selected:
             self._clear_resize_overlay()
+            self._alignment_guides.clear()
+            self._alignment_labels.clear()
             self.selection_style_changed.emit({"type": ""})
             return
         item = selected[0]
         if item in {self._crop_item, self._crop_shade_item, self._resize_overlay_item}:
             self._clear_resize_overlay()
+            self._alignment_guides.clear()
+            self._alignment_labels.clear()
             self.selection_style_changed.emit({"type": ""})
             return
         if len(selected) == 1 and self._can_resize_item(item):
@@ -2322,6 +2751,8 @@ class EditorCanvas(QGraphicsView):
             bool: True if resize handles should be shown.
         """
 
+        if bool(item.data(ITEM_ROLE_LOCKED) or False):
+            return False
         annotation_type = str(item.data(ITEM_ROLE_TYPE) or "")
         return annotation_type in {"rect", "ellipse", "line", "arrow", "text", "image"}
 
@@ -2420,6 +2851,8 @@ class EditorCanvas(QGraphicsView):
             self._scene.removeItem(self._resize_overlay_item)
         self._resize_overlay_item = None
         self._resize_overlay_target = None
+        self._alignment_guides.clear()
+        self._alignment_labels.clear()
 
     def _apply_resize_overlay_to_target(self) -> None:
         """
@@ -2437,6 +2870,9 @@ class EditorCanvas(QGraphicsView):
         if target.scene() is not self._scene:
             self._clear_resize_overlay()
             return
+        if bool(target.data(ITEM_ROLE_LOCKED) or False):
+            self._sync_resize_overlay_with_target(target)
+            return
 
         old_rect = self._target_geometry_rect(target)
         new_rect = self._resize_overlay_item.scene_rect().normalized()
@@ -2445,6 +2881,10 @@ class EditorCanvas(QGraphicsView):
 
         if not self._resize_target_to_rect(target, old_rect, new_rect):
             return
+        _, _, guides, labels = self._compute_alignment_shift(target, new_rect)
+        self._alignment_guides = guides
+        self._alignment_labels = labels
+        self.viewport().update()
         self._emit_content_changed("Resize selection")
 
     def _resize_target_to_rect(
@@ -2549,6 +2989,196 @@ class EditorCanvas(QGraphicsView):
             items.append(item)
         return items
 
+    def list_layer_payloads(self) -> list[dict[str, Any]]:
+        """
+        Returns ordered layer metadata for the layer panel.
+
+        Returns:
+            list[dict[str, Any]]: Top-to-bottom layer payloads.
+        """
+
+        payloads: list[dict[str, Any]] = []
+        items = sorted(
+            self._annotation_items(),
+            key=lambda entry: entry.zValue(),
+            reverse=True,
+        )
+        for index, item in enumerate(items, start=1):
+            annotation_type = str(item.data(ITEM_ROLE_TYPE) or "")
+            layer_id = str(item.data(ITEM_ROLE_ID) or "")
+            if not layer_id:
+                continue
+            rect = self._item_scene_rect(item)
+            label = annotation_type.title() if annotation_type else "Layer"
+            if annotation_type == "text" and isinstance(item, QGraphicsTextItem):
+                preview = item.toPlainText().strip()
+                if preview:
+                    label = f'Text: {preview[:18]}'
+            elif annotation_type == "step" and isinstance(item, StepBadgeItem):
+                label = f"Step {item.step_number()}"
+            payloads.append(
+                {
+                    "id": layer_id,
+                    "name": f"{index}. {label}",
+                    "type": annotation_type,
+                    "visible": bool(item.isVisible()),
+                    "locked": bool(item.data(ITEM_ROLE_LOCKED) or False),
+                    "selected": bool(item.isSelected()),
+                    "x": float(rect.x()),
+                    "y": float(rect.y()),
+                    "width": float(rect.width()),
+                    "height": float(rect.height()),
+                    "z_index": float(item.zValue()),
+                }
+            )
+        return payloads
+
+    def select_layer_by_id(self, layer_id: str) -> bool:
+        """
+        Selects one annotation layer by its internal id.
+
+        Args:
+            layer_id: Stable layer identifier.
+
+        Returns:
+            bool: True when one layer was selected.
+        """
+
+        item = self._annotation_item_by_layer_id(layer_id)
+        if item is None:
+            return False
+        if not item.isVisible():
+            return False
+        self._scene.clearSelection()
+        item.setSelected(True)
+        self._scene.setFocusItem(item)
+        self._sync_resize_overlay_with_target(item)
+        self._refresh_selection_info()
+        return True
+
+    def set_layer_visible(self, layer_id: str, visible: bool) -> bool:
+        """
+        Sets visibility for one layer.
+
+        Args:
+            layer_id: Target layer identifier.
+            visible: True to show, False to hide.
+
+        Returns:
+            bool: True when the layer state changed.
+        """
+
+        item = self._annotation_item_by_layer_id(layer_id)
+        if item is None:
+            return False
+        next_state = bool(visible)
+        if item.isVisible() == next_state:
+            return False
+        item.setVisible(next_state)
+        if not next_state and item.isSelected():
+            self._scene.clearSelection()
+        self._emit_content_changed("Toggle layer visibility")
+        return True
+
+    def set_layer_locked(self, layer_id: str, locked: bool) -> bool:
+        """
+        Locks or unlocks one layer for direct manipulation.
+
+        Args:
+            layer_id: Target layer identifier.
+            locked: True to lock interactions.
+
+        Returns:
+            bool: True when the lock state changed.
+        """
+
+        item = self._annotation_item_by_layer_id(layer_id)
+        if item is None:
+            return False
+        next_locked = bool(locked)
+        current_locked = bool(item.data(ITEM_ROLE_LOCKED) or False)
+        if current_locked == next_locked:
+            return False
+        item.setData(ITEM_ROLE_LOCKED, next_locked)
+        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not next_locked)
+        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self._emit_content_changed("Toggle layer lock")
+        return True
+
+    def nudge_selected_items(self, dx: float, dy: float) -> bool:
+        """
+        Moves selected layers by a precise delta.
+
+        Args:
+            dx: Horizontal delta in scene units.
+            dy: Vertical delta in scene units.
+
+        Returns:
+            bool: True when any selected layer moved.
+        """
+
+        if abs(dx) < 0.001 and abs(dy) < 0.001:
+            return False
+        changed = False
+        selected = self._selected_annotation_items()
+        for item in selected:
+            if bool(item.data(ITEM_ROLE_LOCKED) or False):
+                continue
+            item.setPos(item.pos() + QPointF(dx, dy))
+            changed = True
+        if not changed:
+            return False
+        self._sync_resize_overlay_with_target()
+        self._emit_content_changed("Move selection")
+        return True
+
+    def set_selected_geometry(self, x: float, y: float, width: float, height: float) -> bool:
+        """
+        Applies an explicit geometry box to the primary selected layer.
+
+        Args:
+            x: Target X position.
+            y: Target Y position.
+            width: Target width.
+            height: Target height.
+
+        Returns:
+            bool: True when geometry was applied.
+        """
+
+        selected = self._selected_annotation_items()
+        if not selected:
+            return False
+        target = selected[0]
+        if bool(target.data(ITEM_ROLE_LOCKED) or False):
+            return False
+        old_rect = self._target_geometry_rect(target).normalized()
+        new_rect = QRectF(float(x), float(y), max(2.0, float(width)), max(2.0, float(height))).normalized()
+        if not self._resize_target_to_rect(target, old_rect, new_rect):
+            return False
+        self._sync_resize_overlay_with_target(target)
+        self._emit_content_changed("Set selection geometry")
+        return True
+
+    def _annotation_item_by_layer_id(self, layer_id: str) -> QGraphicsItem | None:
+        """
+        Resolves one annotation item by its layer id.
+
+        Args:
+            layer_id: Internal layer identifier.
+
+        Returns:
+            QGraphicsItem | None: Matching annotation item.
+        """
+
+        target_id = layer_id.strip()
+        if not target_id:
+            return None
+        for item in self._annotation_items():
+            if str(item.data(ITEM_ROLE_ID) or "") == target_id:
+                return item
+        return None
+
     def _snap_selected_items_with_alignment(self) -> None:
         """
         Snaps selected annotations to grid and nearby item alignment.
@@ -2559,6 +3189,7 @@ class EditorCanvas(QGraphicsView):
 
         if not self._snap_enabled:
             self._alignment_guides.clear()
+            self._alignment_labels.clear()
             self.viewport().update()
             return
 
@@ -2569,6 +3200,7 @@ class EditorCanvas(QGraphicsView):
         ]
         if not selected:
             self._alignment_guides.clear()
+            self._alignment_labels.clear()
             self.viewport().update()
             return
 
@@ -2579,11 +3211,12 @@ class EditorCanvas(QGraphicsView):
         grid_dx = grid_anchor.x() - anchor_rect.x()
         grid_dy = grid_anchor.y() - anchor_rect.y()
 
-        align_dx, align_dy, guides = self._compute_alignment_shift(anchor, anchor_rect)
+        align_dx, align_dy, guides, labels = self._compute_alignment_shift(anchor, anchor_rect)
         shift_x = align_dx if align_dx is not None else grid_dx
         shift_y = align_dy if align_dy is not None else grid_dy
         if abs(shift_x) < 0.001 and abs(shift_y) < 0.001:
             self._alignment_guides = guides
+            self._alignment_labels = labels
             self.viewport().update()
             return
 
@@ -2591,14 +3224,44 @@ class EditorCanvas(QGraphicsView):
             item.setPos(item.pos() + QPointF(shift_x, shift_y))
         self._sync_resize_overlay_with_target()
         self._alignment_guides = guides
+        self._alignment_labels = labels
         self.viewport().update()
         self._emit_content_changed("Snap selection")
+
+    def _preview_alignment_guides_for_selection(self) -> None:
+        """
+        Updates smart guides and distance labels while dragging selection.
+
+        Returns:
+            None
+        """
+
+        if not self._snap_enabled:
+            if self._alignment_guides or self._alignment_labels:
+                self._alignment_guides.clear()
+                self._alignment_labels.clear()
+                self.viewport().update()
+            return
+
+        selected = self._selected_annotation_items()
+        if not selected:
+            if self._alignment_guides or self._alignment_labels:
+                self._alignment_guides.clear()
+                self._alignment_labels.clear()
+                self.viewport().update()
+            return
+        anchor = selected[0]
+        anchor_rect = self._item_scene_rect(anchor)
+        _, _, guides, labels = self._compute_alignment_shift(anchor, anchor_rect)
+        self._alignment_guides = guides
+        self._alignment_labels = labels
+        self.viewport().update()
 
     def _compute_alignment_shift(
         self,
         anchor: QGraphicsItem,
         anchor_rect: QRectF,
-    ) -> tuple[float | None, float | None, list[QLineF]]:
+    ) -> tuple[float | None, float | None, list[QLineF], list[tuple[str, QPointF]]]:
         """
         Calculates magnetic alignment offsets against nearby annotations.
 
@@ -2607,12 +3270,13 @@ class EditorCanvas(QGraphicsView):
             anchor_rect: Anchor geometry in scene coordinates.
 
         Returns:
-            tuple[float | None, float | None, list[QLineF]]: Best X/Y offset and guide lines.
+            tuple[float | None, float | None, list[QLineF], list[tuple[str, QPointF]]]:
+                Best X/Y offset, guide lines, and distance labels.
         """
 
         candidates = [item for item in self._annotation_items() if item is not anchor]
         if not candidates:
-            return None, None, []
+            return None, None, [], []
 
         x_points = [
             anchor_rect.left(),
@@ -2628,6 +3292,7 @@ class EditorCanvas(QGraphicsView):
         best_dx: float | None = None
         best_dy: float | None = None
         guides: list[QLineF] = []
+        labels: list[tuple[str, QPointF]] = []
 
         for candidate in candidates:
             rect = self._item_scene_rect(candidate)
@@ -2642,7 +3307,18 @@ class EditorCanvas(QGraphicsView):
                     if best_dx is None or abs(delta) < abs(best_dx):
                         best_dx = delta
                         guides = [line for line in guides if line.p1().x() != line.p2().x()]
+                        labels = [
+                            entry
+                            for entry in labels
+                            if not entry[0].startswith("dx")
+                        ]
                         guides.append(QLineF(target_x, rect.top(), target_x, rect.bottom()))
+                        labels.append(
+                            (
+                                f"dx {abs(delta):.1f}px",
+                                QPointF(target_x + 6.0, rect.center().y()),
+                            )
+                        )
 
             for source_y in y_points:
                 for target_y in compare_y:
@@ -2652,9 +3328,20 @@ class EditorCanvas(QGraphicsView):
                     if best_dy is None or abs(delta) < abs(best_dy):
                         best_dy = delta
                         guides = [line for line in guides if line.p1().y() != line.p2().y()]
+                        labels = [
+                            entry
+                            for entry in labels
+                            if not entry[0].startswith("dy")
+                        ]
                         guides.append(QLineF(rect.left(), target_y, rect.right(), target_y))
+                        labels.append(
+                            (
+                                f"dy {abs(delta):.1f}px",
+                                QPointF(rect.center().x(), target_y - 6.0),
+                            )
+                        )
 
-        return best_dx, best_dy, guides
+        return best_dx, best_dy, guides, labels
 
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
         """
@@ -2701,6 +3388,13 @@ class EditorCanvas(QGraphicsView):
             painter.setPen(guide_pen)
             for line in self._alignment_guides:
                 painter.drawLine(line)
+        if self._alignment_labels:
+            painter.setPen(QPen(QColor(78, 205, 196, 230), 1.0))
+            label_font = painter.font()
+            label_font.setPointSize(max(8, label_font.pointSize() or 8))
+            painter.setFont(label_font)
+            for text, position in self._alignment_labels:
+                painter.drawText(position, text)
 
     def _ensure_crop_shade_item(self) -> None:
         """

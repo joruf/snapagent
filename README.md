@@ -31,17 +31,24 @@ It combines fast capture workflows with a tabbed editor, non-destructive annotat
 - One-shot drawing + **lock mode** (double-click tool to lock).
 - Editable elements with interactive resize handles.
 - **Layer order:** bring forward/backward, bring to front/send to back.
+- **Layer inspector panel:** quick layer picker with visibility and lock toggles.
+- **Geometry inspector:** precise `X/Y/W/H` input with one-click apply.
 - **Duplicate selection** (`Ctrl+D`).
 - Full color workflow:
   - Border / Background / Text color
   - Per-target opacity sliders
   - Color palette quick buttons
 - Text features: font family/size, bold/italic/underline, multi-line dialog.
+- Text inspector: letter spacing, line spacing, box padding, corner radius.
 - History: toolbar Undo/Redo + labeled history list with jump-to-state.
 - Zoom: slider, +/-, Reset, Ctrl + mouse wheel.
+- Precision movement: arrow keys (1 px), `Shift+Arrow` (10 px).
 - Alignment: optional grid, snap-to-grid, magnetic guides.
+- Smart guides show alignment distances while moving/resizing.
 - Non-destructive crop (annotations remain editable).
 - Clipboard: paste text, image, image URL; copy composited image.
+- Cross-tab workflow: copy one tab drawing area and paste-merge it into another tab.
+- Canvas auto-expands when items are moved outside the current drawing bounds.
 
 ### Themes & Settings
 
@@ -61,7 +68,15 @@ It combines fast capture workflows with a tabbed editor, non-destructive annotat
 ### Projects & Export
 
 - Project format `*.sfp` (save/load editable projects).
+- Export presets for Web, Docs, Print, and Lightweight workflows.
 - Export PNG / JPEG / PDF with quality and DPI prompts.
+- Batch export from editor to multiple formats in one step.
+- Batch export queue with progress dialog and cancel support.
+- Last export preset is persisted in user config.
+- Named batch-export profiles can be created and stored from the dialog.
+- Batch profile management supports rename, duplicate, delete, and drag-to-reorder.
+- Last batch-export output directory is remembered across restarts.
+- Closing a tab with existing annotations asks for confirmation.
 - Print support.
 
 ## Screenshots
@@ -185,8 +200,16 @@ python3 run.py capture --mode window --output /tmp/window.png
 python3 run.py pick-color --clipboard
 
 # Export project without opening the editor
-python3 run.py export --project ./example.sfp --format jpg --jpg-quality 90 --output ./export.jpg
-python3 run.py export --project ./example.sfp --format pdf --pdf-dpi 300 --output ./export.pdf
+python3 run.py export --project ./example.sfp --format jpg --preset docs --output ./export.jpg
+python3 run.py export --project ./example.sfp --format pdf --preset print --output ./export.pdf
+
+# Batch export multiple projects and formats
+python3 run.py batch-export \
+  --project ./a.sfp \
+  --project ./b.sfp \
+  --formats png jpg pdf \
+  --preset web \
+  --output-dir ./exports
 
 # Open one project directly in GUI editor host
 python3 run.py open --project ./example.sfp
@@ -244,7 +267,7 @@ See [Technical Documentation](docs/TECHNICAL.md#annotation-model) for details.
 
 User settings: `~/.config/snappix/config.json`
 
-Includes theme, autostart, hotkeys, post-capture action, and save directory.  
+Includes theme, autostart, hotkeys, post-capture action, save directory, and export preset.  
 Full schema: [Technical Documentation → Configuration](docs/TECHNICAL.md#configuration).
 
 ## Testing
@@ -257,13 +280,18 @@ Full schema: [Technical Documentation → Configuration](docs/TECHNICAL.md#confi
 
 ```bash
 # Debian package
-./packaging/build_deb.sh
+./packaging/build_deb.sh 0.1.0
 
 # AppImage package
-./packaging/build_appimage.sh
+./packaging/build_appimage.sh 0.1.0
 ```
 
 Build artifacts are written to `dist/`.
+
+Automated release builds are available via GitHub Actions:
+
+- Push a tag like `v1.2.0` to build `.deb` and `.AppImage` and attach them to the GitHub release.
+- Or run **Release Build** manually from Actions (`workflow_dispatch`) with a version input.
 
 ## License
 

@@ -94,6 +94,17 @@ class SettingsDialog(QDialog):
             self.editor_last_tab_combo.setCurrentIndex(behavior_index)
         form.addRow("When last tab closes:", self.editor_last_tab_combo)
 
+        self.auto_crop_on_shrink_checkbox = QCheckBox(
+            "Auto-crop canvas when content shrinks"
+        )
+        self.auto_crop_on_shrink_checkbox.setToolTip(
+            "When enabled, unused canvas margins are cropped automatically after "
+            "deleting or moving content. Expanding the canvas for overflow always "
+            "stays active."
+        )
+        self.auto_crop_on_shrink_checkbox.setChecked(bool(config.auto_crop_on_shrink))
+        form.addRow("Canvas:", self.auto_crop_on_shrink_checkbox)
+
         save_directory_row = QHBoxLayout()
         self.save_directory_edit = QLineEdit(config.capture_save_directory)
         self.save_directory_edit.setPlaceholderText("~/Pictures/Snappix")
@@ -149,6 +160,13 @@ class SettingsDialog(QDialog):
             editor_last_tab_behavior=normalize_editor_last_tab_behavior(
                 str(self.editor_last_tab_combo.currentData())
             ),
+            export_preset=self._config.export_preset,
+            batch_export_profiles=[
+                dict(profile) for profile in self._config.batch_export_profiles
+            ],
+            batch_export_profile_key=self._config.batch_export_profile_key,
+            batch_export_last_directory=self._config.batch_export_last_directory,
+            auto_crop_on_shrink=self.auto_crop_on_shrink_checkbox.isChecked(),
         )
 
     def _browse_save_directory(self) -> None:

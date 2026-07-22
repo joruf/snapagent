@@ -4,11 +4,23 @@ Main screenshot editing window for Snappix.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import os
+from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import (
+    QByteArray,
+    QBuffer,
+    QEvent,
+    QIODevice,
+    QPointF,
+    QRectF,
+    Qt,
+    Signal,
+    QMimeData,
+)
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -28,16 +40,25 @@ from PySide6.QtGui import (
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QComboBox,
     QColorDialog,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QFileDialog,
+    QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSizePolicy,
     QSlider,
@@ -53,6 +74,13 @@ from src.constants import (
     ABOUT_WEBSITE,
     APP_FILE_EXTENSION,
     APP_NAME,
+)
+from src.config import (
+    EXPORT_PRESET_DOCS,
+    EXPORT_PRESET_LIGHTWEIGHT,
+    EXPORT_PRESET_PRINT,
+    EXPORT_PRESET_WEB,
+    normalize_export_preset,
 )
 from src.annotation_items import (
     STROKE_STYLE_DASH,
@@ -97,6 +125,7 @@ _STROKE_STYLE_LABELS: dict[str, str] = {
     STROKE_STYLE_DOT: "Dotted",
     STROKE_STYLE_DASH_DOT: "Dash-dot",
 }
+_CANVAS_CLIPBOARD_MIME = "application/x-snappix-canvas"
 
 
 def _format_rgba_color(rgba: list[Any]) -> str:
@@ -226,8 +255,11 @@ class EditorWindow(QMainWindow):
 
     close_requested = Signal()
     theme_changed = Signal(str)
+    batch_export_profiles_changed = Signal(object, str)
+    batch_export_last_directory_changed = Signal(str)
     settings_requested = Signal()
     new_canvas_requested = Signal()
+    export_preset_changed = Signal(str)
 
     def __init__(self, screenshot: QPixmap) -> None:
         """
@@ -245,6 +277,37 @@ class EditorWindow(QMainWindow):
         self._minimize_to_tray_on_close = True
         self._jpeg_quality = 90
         self._pdf_dpi = 300
+        self._export_presets: dict[str, tuple[str, int, int]] = {
+            EXPORT_PRESET_WEB: ("Web", 82, 150),
+            EXPORT_PRESET_DOCS: ("Docs", 90, 300),
+            EXPORT_PRESET_PRINT: ("Print", 96, 600),
+            EXPORT_PRESET_LIGHTWEIGHT: ("Lightweight", 72, 120),
+        }
+        self._batch_export_profiles: list[dict[str, Any]] = [
+            {
+                "key": "web_fast",
+                "label": "Web Fast",
+                "formats": ["png", "jpg"],
+                "jpg_quality": 82,
+                "pdf_dpi": 150,
+            },
+            {
+                "key": "docs_hq",
+                "label": "Docs HQ",
+                "formats": ["png", "jpg", "pdf"],
+                "jpg_quality": 90,
+                "pdf_dpi": 300,
+            },
+            {
+                "key": "print_master",
+                "label": "Print Master",
+                "formats": ["png", "jpg", "pdf"],
+                "jpg_quality": 96,
+                "pdf_dpi": 600,
+            },
+        ]
+        self._batch_export_profile_key = "docs_hq"
+        self._batch_export_last_directory = ""
 
         self._record_history = True
         self._history: list[dict[str, Any]] = []
@@ -252,6 +315,7 @@ class EditorWindow(QMainWindow):
         self._history_index = -1
         self._pending_history_label: str | None = None
         self._syncing_history_list = False
+        self._syncing_layer_panel = False
         self._toolbar_groups: list[QWidget] = []
         self._palette_buttons: list[QPushButton] = []
         self._active_tool = Tool.SELECT
@@ -268,6 +332,10 @@ class EditorWindow(QMainWindow):
         self._text_bold_enabled = False
         self._text_italic_enabled = False
         self._text_underline_enabled = False
+        self._text_letter_spacing = 0.0
+        self._text_line_spacing = 1.2
+        self._text_box_padding = 10.0
+        self._text_corner_radius = 6.0
 
         container = QWidget(self)
         self.setCentralWidget(container)
@@ -293,7 +361,14 @@ class EditorWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._selection_info_label)
         self.statusBar().showMessage("Ready")
         self._build_menu()
+        self.set_export_preset(EXPORT_PRESET_DOCS, emit_signal=False)
+        self.set_batch_export_profiles(
+            self._batch_export_profiles,
+            selected_key=self._batch_export_profile_key,
+            emit_signal=False,
+        )
         self._push_history_state()
+        self._refresh_layer_panel()
         self._autosave_timer = self.startTimer(30_000)
 
     def _build_toolbar(self) -> QWidget:
@@ -586,6 +661,56 @@ class EditorWindow(QMainWindow):
         self._configure_compact_icon_button(self.text_underline_button)
         style_row.addWidget(self.text_underline_button)
         text_rows.addLayout(style_row)
+
+        spacing_row = QHBoxLayout()
+        spacing_row.setContentsMargins(0, 0, 0, 0)
+        spacing_row.setSpacing(3)
+        spacing_row.addWidget(QLabel("Letter"))
+        self.text_letter_spacing_spin = QDoubleSpinBox()
+        self.text_letter_spacing_spin.setDecimals(1)
+        self.text_letter_spacing_spin.setSingleStep(0.2)
+        self.text_letter_spacing_spin.setRange(-4.0, 20.0)
+        self.text_letter_spacing_spin.setValue(self._text_letter_spacing)
+        self.text_letter_spacing_spin.valueChanged.connect(self._text_letter_spacing_changed)
+        self._configure_compact_combo(self.text_letter_spacing_spin, 64)
+        self.text_letter_spacing_spin.setEnabled(False)
+        spacing_row.addWidget(self.text_letter_spacing_spin)
+        spacing_row.addWidget(QLabel("Line"))
+        self.text_line_spacing_spin = QDoubleSpinBox()
+        self.text_line_spacing_spin.setDecimals(2)
+        self.text_line_spacing_spin.setSingleStep(0.05)
+        self.text_line_spacing_spin.setRange(0.7, 3.0)
+        self.text_line_spacing_spin.setValue(self._text_line_spacing)
+        self.text_line_spacing_spin.valueChanged.connect(self._text_line_spacing_changed)
+        self._configure_compact_combo(self.text_line_spacing_spin, 64)
+        self.text_line_spacing_spin.setEnabled(False)
+        spacing_row.addWidget(self.text_line_spacing_spin)
+        text_rows.addLayout(spacing_row)
+
+        box_row = QHBoxLayout()
+        box_row.setContentsMargins(0, 0, 0, 0)
+        box_row.setSpacing(3)
+        box_row.addWidget(QLabel("Padding"))
+        self.text_padding_spin = QDoubleSpinBox()
+        self.text_padding_spin.setDecimals(1)
+        self.text_padding_spin.setSingleStep(1.0)
+        self.text_padding_spin.setRange(0.0, 80.0)
+        self.text_padding_spin.setValue(self._text_box_padding)
+        self.text_padding_spin.valueChanged.connect(self._text_padding_changed)
+        self._configure_compact_combo(self.text_padding_spin, 64)
+        self.text_padding_spin.setEnabled(False)
+        box_row.addWidget(self.text_padding_spin)
+        box_row.addWidget(QLabel("Radius"))
+        self.text_radius_spin = QDoubleSpinBox()
+        self.text_radius_spin.setDecimals(1)
+        self.text_radius_spin.setSingleStep(1.0)
+        self.text_radius_spin.setRange(0.0, 80.0)
+        self.text_radius_spin.setValue(self._text_corner_radius)
+        self.text_radius_spin.valueChanged.connect(self._text_radius_changed)
+        self._configure_compact_combo(self.text_radius_spin, 64)
+        self.text_radius_spin.setEnabled(False)
+        box_row.addWidget(self.text_radius_spin)
+        text_rows.addLayout(box_row)
         self._toolbar_groups.append(text_group)
 
         align_group, align_content = self._create_toolbar_group("Align & Grid")
@@ -639,6 +764,104 @@ class EditorWindow(QMainWindow):
         self._configure_compact_toolbar_height(self.history_status_label, 22)
         history_row.addWidget(self.history_status_label)
         self._toolbar_groups.append(history_group)
+
+        layers_group, layers_content = self._create_toolbar_group("Layers & Inspector")
+        layers_rows = QVBoxLayout()
+        layers_rows.setContentsMargins(0, 0, 0, 0)
+        layers_rows.setSpacing(2)
+        layers_content.addLayout(layers_rows)
+
+        layers_select_row = QHBoxLayout()
+        layers_select_row.setContentsMargins(0, 0, 0, 0)
+        layers_select_row.setSpacing(3)
+        layers_select_row.addWidget(QLabel("Layer"))
+        self.layer_combo = QComboBox()
+        self.layer_combo.setMinimumWidth(190)
+        self.layer_combo.currentIndexChanged.connect(self._on_layer_combo_changed)
+        self._configure_compact_toolbar_height(self.layer_combo)
+        layers_select_row.addWidget(self.layer_combo)
+        self.layer_visible_check = QCheckBox("Visible")
+        self.layer_visible_check.toggled.connect(self._toggle_selected_layer_visibility)
+        self._configure_compact_toolbar_height(self.layer_visible_check, 22)
+        layers_select_row.addWidget(self.layer_visible_check)
+        self.layer_lock_check = QCheckBox("Lock")
+        self.layer_lock_check.toggled.connect(self._toggle_selected_layer_lock)
+        self._configure_compact_toolbar_height(self.layer_lock_check, 22)
+        layers_select_row.addWidget(self.layer_lock_check)
+        layers_rows.addLayout(layers_select_row)
+
+        layers_order_row = QHBoxLayout()
+        layers_order_row.setContentsMargins(0, 0, 0, 0)
+        layers_order_row.setSpacing(3)
+        self.layer_up_button = QPushButton("Up")
+        self.layer_up_button.clicked.connect(self._move_selected_layer_up)
+        self._configure_compact_toolbar_height(self.layer_up_button)
+        layers_order_row.addWidget(self.layer_up_button)
+        self.layer_down_button = QPushButton("Down")
+        self.layer_down_button.clicked.connect(self._move_selected_layer_down)
+        self._configure_compact_toolbar_height(self.layer_down_button)
+        layers_order_row.addWidget(self.layer_down_button)
+        layers_order_row.addStretch(1)
+        layers_rows.addLayout(layers_order_row)
+
+        geometry_row = QHBoxLayout()
+        geometry_row.setContentsMargins(0, 0, 0, 0)
+        geometry_row.setSpacing(3)
+        geometry_row.addWidget(QLabel("X"))
+        self.geometry_x_spin = QSpinBox()
+        self.geometry_x_spin.setRange(-10000, 100000)
+        self._configure_compact_combo(self.geometry_x_spin, 70)
+        geometry_row.addWidget(self.geometry_x_spin)
+        geometry_row.addWidget(QLabel("Y"))
+        self.geometry_y_spin = QSpinBox()
+        self.geometry_y_spin.setRange(-10000, 100000)
+        self._configure_compact_combo(self.geometry_y_spin, 70)
+        geometry_row.addWidget(self.geometry_y_spin)
+        geometry_row.addWidget(QLabel("W"))
+        self.geometry_w_spin = QSpinBox()
+        self.geometry_w_spin.setRange(2, 100000)
+        self._configure_compact_combo(self.geometry_w_spin, 70)
+        geometry_row.addWidget(self.geometry_w_spin)
+        geometry_row.addWidget(QLabel("H"))
+        self.geometry_h_spin = QSpinBox()
+        self.geometry_h_spin.setRange(2, 100000)
+        self._configure_compact_combo(self.geometry_h_spin, 70)
+        geometry_row.addWidget(self.geometry_h_spin)
+        self.geometry_apply_button = QPushButton("Apply")
+        self.geometry_apply_button.clicked.connect(self._apply_selected_geometry)
+        self._configure_compact_toolbar_height(self.geometry_apply_button)
+        geometry_row.addWidget(self.geometry_apply_button)
+        layers_rows.addLayout(geometry_row)
+        self._toolbar_groups.append(layers_group)
+
+        export_group, export_content = self._create_toolbar_group("Export")
+        export_row = QHBoxLayout()
+        export_row.setContentsMargins(0, 0, 0, 0)
+        export_row.setSpacing(3)
+        export_content.addLayout(export_row)
+        export_row.addWidget(QLabel("Preset"))
+        self.export_preset_combo = QComboBox()
+        for preset_key, preset_values in self._export_presets.items():
+            self.export_preset_combo.addItem(preset_values[0], preset_key)
+        self.export_preset_combo.currentIndexChanged.connect(self._on_export_preset_index_changed)
+        self._configure_compact_combo(self.export_preset_combo, 110)
+        export_row.addWidget(self.export_preset_combo)
+        export_row.addWidget(QLabel("Batch"))
+        self.batch_profile_combo = QComboBox()
+        self.batch_profile_combo.currentIndexChanged.connect(
+            self._on_batch_profile_index_changed
+        )
+        self._configure_compact_combo(self.batch_profile_combo, 130)
+        export_row.addWidget(self.batch_profile_combo)
+        self.manage_batch_profiles_button = QPushButton("Manage")
+        self.manage_batch_profiles_button.clicked.connect(self.manage_batch_profiles)
+        self._configure_compact_toolbar_height(self.manage_batch_profiles_button)
+        export_row.addWidget(self.manage_batch_profiles_button)
+        self.export_batch_button = QPushButton("Batch Export")
+        self.export_batch_button.clicked.connect(self.export_batch_with_dialog)
+        self._configure_compact_toolbar_height(self.export_batch_button)
+        export_row.addWidget(self.export_batch_button)
+        self._toolbar_groups.append(export_group)
 
         zoom_group, zoom_content = self._create_toolbar_group("Zoom")
         zoom_row = QHBoxLayout()
@@ -995,6 +1218,10 @@ class EditorWindow(QMainWindow):
         self.text_bold_button.setToolTip("Toggle bold text style.")
         self.text_italic_button.setToolTip("Toggle italic text style.")
         self.text_underline_button.setToolTip("Toggle underline text style.")
+        self.text_letter_spacing_spin.setToolTip("Adjust text letter spacing.")
+        self.text_line_spacing_spin.setToolTip("Adjust multiline line spacing.")
+        self.text_padding_spin.setToolTip("Adjust text box inner padding.")
+        self.text_radius_spin.setToolTip("Adjust text box corner radius.")
         self.snap_to_grid_button.setToolTip("Snap drawing and movement to grid.")
         self.grid_visible_button.setToolTip("Show or hide the alignment grid.")
         self.grid_size_combo.setToolTip("Choose grid spacing in pixels.")
@@ -1006,6 +1233,20 @@ class EditorWindow(QMainWindow):
         self.history_redo_button.setToolTip("Redo the last undone change.")
         self.history_list_combo.setToolTip("History entries with action names.")
         self.history_status_label.setToolTip("Current history position.")
+        self.layer_combo.setToolTip("Select one layer to inspect or edit.")
+        self.layer_visible_check.setToolTip("Toggle visibility for selected layer.")
+        self.layer_lock_check.setToolTip("Lock selected layer against edits.")
+        self.layer_up_button.setToolTip("Move selected layer one step up.")
+        self.layer_down_button.setToolTip("Move selected layer one step down.")
+        self.geometry_x_spin.setToolTip("Set selected layer X position.")
+        self.geometry_y_spin.setToolTip("Set selected layer Y position.")
+        self.geometry_w_spin.setToolTip("Set selected layer width.")
+        self.geometry_h_spin.setToolTip("Set selected layer height.")
+        self.geometry_apply_button.setToolTip("Apply X/Y/W/H values to selected layer.")
+        self.export_preset_combo.setToolTip("Select export quality preset.")
+        self.batch_profile_combo.setToolTip("Select named batch export profile.")
+        self.manage_batch_profiles_button.setToolTip("Rename, duplicate, delete, and reorder batch profiles.")
+        self.export_batch_button.setToolTip("Export current tab to multiple formats.")
 
     def _build_menu(self) -> None:
         """
@@ -1067,6 +1308,11 @@ class EditorWindow(QMainWindow):
         export_pdf.setToolTip("Export the composited image as PDF.")
         export_pdf.triggered.connect(self.export_pdf)
         file_menu.addAction(export_pdf)
+
+        export_batch = QAction("Batch Export...", self)
+        export_batch.setToolTip("Export current tab to multiple formats at once.")
+        export_batch.triggered.connect(self.export_batch_with_dialog)
+        file_menu.addAction(export_batch)
 
         file_menu.addSeparator()
 
@@ -1140,8 +1386,20 @@ class EditorWindow(QMainWindow):
         paste_action = QAction("Paste", self)
         paste_action.setShortcut(QKeySequence.StandardKey.Paste)
         paste_action.setToolTip("Paste text or image from clipboard.")
-        paste_action.triggered.connect(lambda: self.canvas.paste_from_clipboard())
+        paste_action.triggered.connect(self.paste_from_clipboard)
         edit_menu.addAction(paste_action)
+
+        copy_canvas_area_action = QAction("Copy Drawing Area", self)
+        copy_canvas_area_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        copy_canvas_area_action.setToolTip("Copy this tab drawing area for another tab.")
+        copy_canvas_area_action.triggered.connect(self.copy_drawing_area_to_clipboard)
+        edit_menu.addAction(copy_canvas_area_action)
+
+        paste_canvas_area_action = QAction("Paste Drawing Area", self)
+        paste_canvas_area_action.setShortcut(QKeySequence("Ctrl+Shift+V"))
+        paste_canvas_area_action.setToolTip("Paste copied drawing area into this tab.")
+        paste_canvas_area_action.triggered.connect(self.paste_drawing_area_from_clipboard)
+        edit_menu.addAction(paste_canvas_area_action)
 
         copy_image_action = QAction("Copy Image", self)
         copy_image_action.setShortcut(QKeySequence.StandardKey.Copy)
@@ -1788,6 +2046,70 @@ class EditorWindow(QMainWindow):
         self.canvas.set_style(font_underline=self._text_underline_enabled)
         self._push_history_state()
 
+    def _text_letter_spacing_changed(self, value: float) -> None:
+        """
+        Updates active and selected text letter spacing.
+
+        Args:
+            value: Letter spacing in pixels.
+
+        Returns:
+            None
+        """
+
+        self._text_letter_spacing = float(value)
+        self._set_next_history_label("Change letter spacing")
+        self.canvas.set_style(letter_spacing=self._text_letter_spacing)
+        self._push_history_state()
+
+    def _text_line_spacing_changed(self, value: float) -> None:
+        """
+        Updates active and selected text line spacing.
+
+        Args:
+            value: Line spacing multiplier.
+
+        Returns:
+            None
+        """
+
+        self._text_line_spacing = float(value)
+        self._set_next_history_label("Change line spacing")
+        self.canvas.set_style(line_spacing_factor=self._text_line_spacing)
+        self._push_history_state()
+
+    def _text_padding_changed(self, value: float) -> None:
+        """
+        Updates active and selected text box padding.
+
+        Args:
+            value: Inner box padding in pixels.
+
+        Returns:
+            None
+        """
+
+        self._text_box_padding = float(value)
+        self._set_next_history_label("Change text box padding")
+        self.canvas.set_style(box_padding=self._text_box_padding)
+        self._push_history_state()
+
+    def _text_radius_changed(self, value: float) -> None:
+        """
+        Updates active and selected text box corner radius.
+
+        Args:
+            value: Corner radius in pixels.
+
+        Returns:
+            None
+        """
+
+        self._text_corner_radius = float(value)
+        self._set_next_history_label("Change text box radius")
+        self.canvas.set_style(corner_radius=self._text_corner_radius)
+        self._push_history_state()
+
     def _snap_toggled(self, checked: bool) -> None:
         """
         Enables or disables snap-to-grid behavior on the canvas.
@@ -1872,6 +2194,7 @@ class EditorWindow(QMainWindow):
         action_label = self.canvas.consume_last_action_label()
         self._set_next_history_label(action_label)
         self._push_history_state()
+        self._refresh_layer_panel()
         self._show_canvas_action_notification(action_label)
         self._apply_one_shot_tool_completion(action_label)
 
@@ -2003,8 +2326,265 @@ class EditorWindow(QMainWindow):
             self.text_underline_button.blockSignals(True)
             self.text_underline_button.setChecked(font_underline)
             self.text_underline_button.blockSignals(False)
+        letter_spacing = payload.get("letter_spacing")
+        if isinstance(letter_spacing, (int, float)):
+            self._text_letter_spacing = float(letter_spacing)
+            self.text_letter_spacing_spin.blockSignals(True)
+            self.text_letter_spacing_spin.setValue(float(letter_spacing))
+            self.text_letter_spacing_spin.blockSignals(False)
+        line_spacing_factor = payload.get("line_spacing_factor")
+        if isinstance(line_spacing_factor, (int, float)):
+            self._text_line_spacing = float(line_spacing_factor)
+            self.text_line_spacing_spin.blockSignals(True)
+            self.text_line_spacing_spin.setValue(float(line_spacing_factor))
+            self.text_line_spacing_spin.blockSignals(False)
+        box_padding = payload.get("box_padding")
+        if isinstance(box_padding, (int, float)):
+            self._text_box_padding = float(box_padding)
+            self.text_padding_spin.blockSignals(True)
+            self.text_padding_spin.setValue(float(box_padding))
+            self.text_padding_spin.blockSignals(False)
+        corner_radius = payload.get("corner_radius")
+        if isinstance(corner_radius, (int, float)):
+            self._text_corner_radius = float(corner_radius)
+            self.text_radius_spin.blockSignals(True)
+            self.text_radius_spin.setValue(float(corner_radius))
+            self.text_radius_spin.blockSignals(False)
+        has_text_selection = str(payload.get("type") or "") == "text"
+        text_style = str(payload.get("text_style") or TEXT_STYLE_PLAIN)
+        supports_container_layout = text_style in {TEXT_STYLE_BOX, TEXT_STYLE_BUBBLE}
+        self.text_letter_spacing_spin.setEnabled(has_text_selection)
+        self.text_line_spacing_spin.setEnabled(supports_container_layout)
+        self.text_padding_spin.setEnabled(supports_container_layout)
+        self.text_radius_spin.setEnabled(supports_container_layout)
 
+        self._update_geometry_controls_from_payload(payload)
+        self._sync_layer_controls_from_payload(payload)
         self._selection_info_label.setText(format_selection_info(payload))
+
+    def _refresh_layer_panel(self) -> None:
+        """
+        Rebuilds layer list and keeps the selected entry in sync.
+
+        Returns:
+            None
+        """
+
+        layer_payloads = self.canvas.list_layer_payloads()
+        selected_id = ""
+        for payload in layer_payloads:
+            if bool(payload.get("selected")):
+                selected_id = str(payload.get("id") or "")
+                break
+
+        self._syncing_layer_panel = True
+        self.layer_combo.clear()
+        for payload in layer_payloads:
+            label = str(payload.get("name") or "Layer")
+            layer_id = str(payload.get("id") or "")
+            self.layer_combo.addItem(label, layer_id)
+        if selected_id:
+            selected_index = self.layer_combo.findData(selected_id)
+            if selected_index >= 0:
+                self.layer_combo.setCurrentIndex(selected_index)
+        self._syncing_layer_panel = False
+        self._set_layer_controls_enabled(bool(layer_payloads))
+
+    def _set_layer_controls_enabled(self, enabled: bool) -> None:
+        """
+        Enables or disables layer and geometry controls.
+
+        Args:
+            enabled: True to enable controls.
+
+        Returns:
+            None
+        """
+
+        self.layer_combo.setEnabled(enabled)
+        self.layer_visible_check.setEnabled(enabled)
+        self.layer_lock_check.setEnabled(enabled)
+        self.layer_up_button.setEnabled(enabled)
+        self.layer_down_button.setEnabled(enabled)
+        self.geometry_x_spin.setEnabled(enabled)
+        self.geometry_y_spin.setEnabled(enabled)
+        self.geometry_w_spin.setEnabled(enabled)
+        self.geometry_h_spin.setEnabled(enabled)
+        self.geometry_apply_button.setEnabled(enabled)
+
+    def _selected_layer_id(self) -> str:
+        """
+        Returns currently selected layer id from the layer combo.
+
+        Returns:
+            str: Selected layer id or empty string.
+        """
+
+        data = self.layer_combo.currentData()
+        if not isinstance(data, str):
+            return ""
+        return data.strip()
+
+    def _on_layer_combo_changed(self, _index: int) -> None:
+        """
+        Selects a layer on canvas when layer combo selection changes.
+
+        Args:
+            _index: Current combo index.
+
+        Returns:
+            None
+        """
+
+        if self._syncing_layer_panel:
+            return
+        layer_id = self._selected_layer_id()
+        if not layer_id:
+            return
+        self.canvas.select_layer_by_id(layer_id)
+
+    def _toggle_selected_layer_visibility(self, checked: bool) -> None:
+        """
+        Toggles visibility for the currently selected layer.
+
+        Args:
+            checked: True when layer should stay visible.
+
+        Returns:
+            None
+        """
+
+        if self._syncing_layer_panel:
+            return
+        layer_id = self._selected_layer_id()
+        if not layer_id:
+            return
+        if self.canvas.set_layer_visible(layer_id, bool(checked)):
+            self._set_next_history_label("Toggle layer visibility")
+            self._push_history_state()
+        self._refresh_layer_panel()
+
+    def _toggle_selected_layer_lock(self, checked: bool) -> None:
+        """
+        Toggles lock state for the currently selected layer.
+
+        Args:
+            checked: True when layer should be locked.
+
+        Returns:
+            None
+        """
+
+        if self._syncing_layer_panel:
+            return
+        layer_id = self._selected_layer_id()
+        if not layer_id:
+            return
+        if self.canvas.set_layer_locked(layer_id, bool(checked)):
+            self._set_next_history_label("Toggle layer lock")
+            self._push_history_state()
+        self._refresh_layer_panel()
+
+    def _move_selected_layer_up(self) -> None:
+        """
+        Moves current selected layer one step forward.
+
+        Returns:
+            None
+        """
+
+        self._set_next_history_label("Move layer up")
+        self.canvas.bring_selected_forward()
+        self._refresh_layer_panel()
+
+    def _move_selected_layer_down(self) -> None:
+        """
+        Moves current selected layer one step backward.
+
+        Returns:
+            None
+        """
+
+        self._set_next_history_label("Move layer down")
+        self.canvas.send_selected_backward()
+        self._refresh_layer_panel()
+
+    def _update_geometry_controls_from_payload(self, payload: dict[str, Any]) -> None:
+        """
+        Synchronizes X/Y/W/H controls from current selection payload.
+
+        Args:
+            payload: Selection payload from canvas.
+
+        Returns:
+            None
+        """
+
+        x_value = payload.get("x")
+        y_value = payload.get("y")
+        width_value = payload.get("width")
+        height_value = payload.get("height")
+        if not (
+            isinstance(x_value, (int, float))
+            and isinstance(y_value, (int, float))
+            and isinstance(width_value, (int, float))
+            and isinstance(height_value, (int, float))
+        ):
+            return
+        self.geometry_x_spin.blockSignals(True)
+        self.geometry_y_spin.blockSignals(True)
+        self.geometry_w_spin.blockSignals(True)
+        self.geometry_h_spin.blockSignals(True)
+        self.geometry_x_spin.setValue(int(round(x_value)))
+        self.geometry_y_spin.setValue(int(round(y_value)))
+        self.geometry_w_spin.setValue(max(2, int(round(width_value))))
+        self.geometry_h_spin.setValue(max(2, int(round(height_value))))
+        self.geometry_x_spin.blockSignals(False)
+        self.geometry_y_spin.blockSignals(False)
+        self.geometry_w_spin.blockSignals(False)
+        self.geometry_h_spin.blockSignals(False)
+
+    def _sync_layer_controls_from_payload(self, payload: dict[str, Any]) -> None:
+        """
+        Synchronizes layer controls from current selection payload.
+
+        Args:
+            payload: Selection payload from canvas.
+
+        Returns:
+            None
+        """
+
+        layer_id = payload.get("layer_id")
+        if isinstance(layer_id, str) and layer_id:
+            if self.layer_combo.findData(layer_id) >= 0:
+                self._syncing_layer_panel = True
+                self.layer_combo.setCurrentIndex(self.layer_combo.findData(layer_id))
+                self._syncing_layer_panel = False
+        self.layer_visible_check.blockSignals(True)
+        self.layer_lock_check.blockSignals(True)
+        self.layer_visible_check.setChecked(bool(payload.get("visible", True)))
+        self.layer_lock_check.setChecked(bool(payload.get("locked", False)))
+        self.layer_visible_check.blockSignals(False)
+        self.layer_lock_check.blockSignals(False)
+
+    def _apply_selected_geometry(self) -> None:
+        """
+        Applies inspector X/Y/W/H values to current selected layer.
+
+        Returns:
+            None
+        """
+
+        if self.canvas.set_selected_geometry(
+            x=float(self.geometry_x_spin.value()),
+            y=float(self.geometry_y_spin.value()),
+            width=float(self.geometry_w_spin.value()),
+            height=float(self.geometry_h_spin.value()),
+        ):
+            self._set_next_history_label("Set selection geometry")
+            self._push_history_state()
+            self._refresh_layer_panel()
 
     def _on_crop_state_changed(self, is_active: bool) -> None:
         """
@@ -2042,6 +2622,7 @@ class EditorWindow(QMainWindow):
         return {
             "screenshot_png_base64": pixmap_to_base64_png(self.canvas.screenshot()),
             "annotations": [item.to_dict() for item in self.canvas.collect_annotations()],
+            "base_content": self.canvas.base_content_payload(),
         }
 
     def _restore_state(self, snapshot: dict[str, Any]) -> None:
@@ -2065,7 +2646,9 @@ class EditorWindow(QMainWindow):
         self._record_history = False
         self.canvas.set_screenshot(screenshot)
         self.canvas.load_annotations(annotations)
+        self.canvas.restore_base_content_payload(snapshot.get("base_content"))
         self._record_history = True
+        self._refresh_layer_panel()
 
     def _push_history_state(self) -> None:
         """
@@ -2272,6 +2855,7 @@ class EditorWindow(QMainWindow):
         self._history_labels.clear()
         self._history_index = -1
         self._push_history_state()
+        self._refresh_layer_panel()
         self._current_project_path = file_path
         self._update_window_title()
         self.statusBar().showMessage("Project loaded")
@@ -2361,6 +2945,7 @@ class EditorWindow(QMainWindow):
         self._history_index = -1
         self._set_next_history_label("Recovered project" if not source_path else "Open project")
         self._push_history_state()
+        self._refresh_layer_panel()
         self._current_project_path = source_path
         self._update_window_title()
 
@@ -2568,6 +3153,763 @@ class EditorWindow(QMainWindow):
             return None
         return dpi
 
+    def _on_export_preset_index_changed(self, _index: int) -> None:
+        """
+        Handles export preset combo-box selection changes.
+
+        Args:
+            _index: Current combo index.
+
+        Returns:
+            None
+        """
+
+        preset_key = self.export_preset()
+        if not preset_key:
+            return
+        self._apply_export_preset_values(preset_key)
+        self.export_preset_changed.emit(preset_key)
+
+    def _apply_export_preset_values(self, preset_key: str) -> None:
+        """
+        Applies quality defaults from one export preset.
+
+        Args:
+            preset_key: Export preset key.
+
+        Returns:
+            None
+        """
+
+        values = self._export_presets.get(normalize_export_preset(preset_key))
+        if values is None:
+            return
+        label, jpeg_quality, pdf_dpi = values
+        self._jpeg_quality = jpeg_quality
+        self._pdf_dpi = pdf_dpi
+        self.statusBar().showMessage(
+            f"Preset '{label}' applied: JPG {self._jpeg_quality}, PDF {self._pdf_dpi} DPI",
+            2500,
+        )
+
+    def set_export_preset(self, preset_key: str, *, emit_signal: bool = False) -> None:
+        """
+        Selects the export preset in the toolbar.
+
+        Args:
+            preset_key: Export preset key to select.
+            emit_signal: True to emit the changed signal.
+
+        Returns:
+            None
+        """
+
+        normalized = normalize_export_preset(preset_key)
+        index = self.export_preset_combo.findData(normalized)
+        if index < 0:
+            return
+        self.export_preset_combo.blockSignals(True)
+        self.export_preset_combo.setCurrentIndex(index)
+        self.export_preset_combo.blockSignals(False)
+        self._apply_export_preset_values(normalized)
+        if emit_signal:
+            self.export_preset_changed.emit(normalized)
+
+    def set_auto_crop_on_shrink(self, enabled: bool) -> None:
+        """
+        Enables or disables automatic canvas crop when content shrinks.
+
+        Args:
+            enabled: True to crop unused margins automatically.
+
+        Returns:
+            None
+        """
+
+        self.canvas.set_auto_crop_on_shrink(enabled)
+
+    def export_preset(self) -> str:
+        """
+        Returns the currently selected export preset key.
+
+        Returns:
+            str: Export preset key.
+        """
+
+        data = self.export_preset_combo.currentData()
+        if not isinstance(data, str):
+            return EXPORT_PRESET_DOCS
+        return normalize_export_preset(data)
+
+    def _normalize_batch_profile_key(self, value: str) -> str:
+        """
+        Normalizes one batch profile key string.
+
+        Args:
+            value: Raw key or label text.
+
+        Returns:
+            str: Normalized key value.
+        """
+
+        normalized = "".join(
+            character.lower()
+            if character.isalnum() or character == "_"
+            else "_"
+            for character in value.strip()
+        ).strip("_")
+        return normalized or "profile"
+
+    def _sanitize_batch_export_profiles(
+        self,
+        profiles: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        Sanitizes batch export profile entries for runtime use.
+
+        Args:
+            profiles: Raw profile list.
+
+        Returns:
+            list[dict[str, Any]]: Validated profile list.
+        """
+
+        sanitized: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for index, profile in enumerate(profiles):
+            if not isinstance(profile, dict):
+                continue
+            key = self._normalize_batch_profile_key(str(profile.get("key", "")))
+            if key in seen_keys:
+                continue
+            label = str(profile.get("label", "")).strip() or f"Profile {index + 1}"
+            formats = [
+                str(value).strip().lower()
+                for value in list(profile.get("formats", []))
+                if str(value).strip().lower() in {"png", "jpg", "pdf"}
+            ]
+            if not formats:
+                formats = ["png"]
+            sanitized.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "formats": formats,
+                    "jpg_quality": max(1, min(100, int(profile.get("jpg_quality", 90)))),
+                    "pdf_dpi": max(72, min(1200, int(profile.get("pdf_dpi", 300)))),
+                }
+            )
+            seen_keys.add(key)
+        if sanitized:
+            return sanitized
+        return [
+            {
+                "key": "docs_hq",
+                "label": "Docs HQ",
+                "formats": ["png", "jpg", "pdf"],
+                "jpg_quality": 90,
+                "pdf_dpi": 300,
+            }
+        ]
+
+    def set_batch_export_profiles(
+        self,
+        profiles: list[dict[str, Any]],
+        *,
+        selected_key: str = "",
+        emit_signal: bool = False,
+    ) -> None:
+        """
+        Sets available batch export profiles and refreshes profile selector.
+
+        Args:
+            profiles: Profile definitions.
+            selected_key: Preferred selected profile key.
+            emit_signal: True to emit profile-changed signal.
+
+        Returns:
+            None
+        """
+
+        self._batch_export_profiles = self._sanitize_batch_export_profiles(profiles)
+        preferred_key = self._normalize_batch_profile_key(selected_key)
+        available_keys = {profile["key"] for profile in self._batch_export_profiles}
+        if preferred_key not in available_keys:
+            preferred_key = self._batch_export_profiles[0]["key"]
+        self._batch_export_profile_key = preferred_key
+        self.batch_profile_combo.blockSignals(True)
+        self.batch_profile_combo.clear()
+        for profile in self._batch_export_profiles:
+            self.batch_profile_combo.addItem(profile["label"], profile["key"])
+        selected_index = self.batch_profile_combo.findData(self._batch_export_profile_key)
+        if selected_index >= 0:
+            self.batch_profile_combo.setCurrentIndex(selected_index)
+        self.batch_profile_combo.blockSignals(False)
+        if emit_signal:
+            self.batch_export_profiles_changed.emit(
+                [dict(profile) for profile in self._batch_export_profiles],
+                self._batch_export_profile_key,
+            )
+
+    def batch_export_profiles(self) -> list[dict[str, Any]]:
+        """
+        Returns the current batch export profile list.
+
+        Returns:
+            list[dict[str, Any]]: Batch profile definitions.
+        """
+
+        return [dict(profile) for profile in self._batch_export_profiles]
+
+    def set_batch_export_last_directory(
+        self,
+        path: str,
+        *,
+        emit_signal: bool = False,
+    ) -> None:
+        """
+        Sets the remembered batch export output directory.
+
+        Args:
+            path: Directory path.
+            emit_signal: True to emit directory-changed signal.
+
+        Returns:
+            None
+        """
+
+        self._batch_export_last_directory = path.strip()
+        if emit_signal:
+            self.batch_export_last_directory_changed.emit(self._batch_export_last_directory)
+
+    def batch_export_last_directory(self) -> str:
+        """
+        Returns the remembered batch export output directory.
+
+        Returns:
+            str: Last used directory path.
+        """
+
+        return self._batch_export_last_directory
+
+    def _selected_batch_profile_definition(self) -> dict[str, Any]:
+        """
+        Returns the active batch profile definition.
+
+        Returns:
+            dict[str, Any]: Selected batch profile.
+        """
+
+        if not self._batch_export_profiles:
+            return {
+                "key": "docs_hq",
+                "label": "Docs HQ",
+                "formats": ["png", "jpg", "pdf"],
+                "jpg_quality": 90,
+                "pdf_dpi": 300,
+            }
+        for profile in self._batch_export_profiles:
+            if profile["key"] == self._batch_export_profile_key:
+                return profile
+        return self._batch_export_profiles[0]
+
+    def _on_batch_profile_index_changed(self, _index: int) -> None:
+        """
+        Updates active batch profile from selector changes.
+
+        Args:
+            _index: Current profile combo index.
+
+        Returns:
+            None
+        """
+
+        data = self.batch_profile_combo.currentData()
+        if not isinstance(data, str):
+            return
+        self._batch_export_profile_key = self._normalize_batch_profile_key(data)
+        self.batch_export_profiles_changed.emit(
+            [dict(profile) for profile in self._batch_export_profiles],
+            self._batch_export_profile_key,
+        )
+
+    def manage_batch_profiles(self) -> None:
+        """
+        Opens profile management dialog for renaming and deleting profiles.
+
+        Returns:
+            None
+        """
+
+        profiles_working = [dict(profile) for profile in self._batch_export_profiles]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manage Batch Export Profiles")
+        dialog.setModal(True)
+        dialog.resize(420, 300)
+        root_layout = QVBoxLayout(dialog)
+        root_layout.addWidget(QLabel("Saved profiles:"))
+
+        list_widget = QListWidget(dialog)
+        list_widget.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        list_widget.setDefaultDropAction(Qt.DropAction.MoveAction)
+        list_widget.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        for profile in profiles_working:
+            item = QListWidgetItem(f"{profile['label']} ({profile['key']})")
+            item.setData(Qt.ItemDataRole.UserRole, profile["key"])
+            list_widget.addItem(item)
+        selected_index = 0
+        for index, profile in enumerate(profiles_working):
+            if profile["key"] == self._batch_export_profile_key:
+                selected_index = index
+                break
+        if list_widget.count() > 0:
+            list_widget.setCurrentRow(selected_index)
+        root_layout.addWidget(list_widget)
+
+        actions_row = QHBoxLayout()
+        rename_button = QPushButton("Rename", dialog)
+        duplicate_button = QPushButton("Duplicate", dialog)
+        delete_button = QPushButton("Delete", dialog)
+        actions_row.addWidget(rename_button)
+        actions_row.addWidget(duplicate_button)
+        actions_row.addWidget(delete_button)
+        actions_row.addStretch(1)
+        root_layout.addLayout(actions_row)
+
+        def profile_order_from_list() -> list[str]:
+            order: list[str] = []
+            for row in range(list_widget.count()):
+                item = list_widget.item(row)
+                if item is None:
+                    continue
+                key = item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(key, str) and key.strip():
+                    order.append(key.strip())
+            return order
+
+        def sync_profiles_from_list() -> None:
+            nonlocal profiles_working
+            key_order = profile_order_from_list()
+            by_key = {
+                str(profile["key"]): dict(profile)
+                for profile in profiles_working
+            }
+            reordered: list[dict[str, Any]] = []
+            for key in key_order:
+                profile = by_key.get(key)
+                if profile is not None:
+                    reordered.append(profile)
+            # Keep any profiles that were not represented in the widget.
+            represented = {str(profile["key"]) for profile in reordered}
+            for profile in profiles_working:
+                key = str(profile["key"])
+                if key in represented:
+                    continue
+                reordered.append(dict(profile))
+            profiles_working = reordered
+
+        def index_for_key(profile_key: str) -> int:
+            for idx, profile in enumerate(profiles_working):
+                if str(profile["key"]) == profile_key:
+                    return idx
+            return -1
+
+        def selected_profile_key() -> str:
+            item = list_widget.currentItem()
+            if item is None:
+                return ""
+            key = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(key, str):
+                return ""
+            return key.strip()
+
+        def selected_profile_index() -> int:
+            key = selected_profile_key()
+            if not key:
+                return -1
+            sync_profiles_from_list()
+            return index_for_key(key)
+
+        def refresh_list_labels() -> None:
+            label_by_key = {
+                str(profile["key"]): str(profile["label"])
+                for profile in profiles_working
+            }
+            for row in range(list_widget.count()):
+                item = list_widget.item(row)
+                if item is None:
+                    continue
+                key = item.data(Qt.ItemDataRole.UserRole)
+                if not isinstance(key, str):
+                    continue
+                label = label_by_key.get(key.strip(), key.strip())
+                item.setText(f"{label} ({key.strip()})")
+
+        def unique_profile_key(base_value: str) -> str:
+            seed = self._normalize_batch_profile_key(base_value)
+            existing = {
+                str(profile["key"])
+                for profile in profiles_working
+            }
+            if seed not in existing:
+                return seed
+            counter = 2
+            while f"{seed}_{counter}" in existing:
+                counter += 1
+            return f"{seed}_{counter}"
+
+        def rename_selected_profile() -> None:
+            index = selected_profile_index()
+            if index < 0:
+                return
+            current_profile = profiles_working[index]
+            next_label, accepted = QInputDialog.getText(
+                dialog,
+                "Rename Profile",
+                "Profile name:",
+                QLineEdit.EchoMode.Normal,
+                str(current_profile["label"]),
+            )
+            if not accepted:
+                return
+            cleaned_label = next_label.strip()
+            if not cleaned_label:
+                return
+            current_profile["label"] = cleaned_label
+            refresh_list_labels()
+
+        def duplicate_selected_profile() -> None:
+            index = selected_profile_index()
+            if index < 0:
+                return
+            source_profile = dict(profiles_working[index])
+            suggested_name = f"{source_profile['label']} Copy"
+            profile_name, accepted = QInputDialog.getText(
+                dialog,
+                "Duplicate Profile",
+                "New profile name:",
+                QLineEdit.EchoMode.Normal,
+                suggested_name,
+            )
+            if not accepted:
+                return
+            cleaned_name = profile_name.strip() or suggested_name
+            new_key = unique_profile_key(cleaned_name)
+            duplicated = {
+                "key": new_key,
+                "label": cleaned_name,
+                "formats": list(source_profile.get("formats", ["png"])),
+                "jpg_quality": int(source_profile.get("jpg_quality", 90)),
+                "pdf_dpi": int(source_profile.get("pdf_dpi", 300)),
+            }
+            profiles_working.append(duplicated)
+            item = QListWidgetItem(f"{duplicated['label']} ({duplicated['key']})")
+            item.setData(Qt.ItemDataRole.UserRole, duplicated["key"])
+            list_widget.addItem(item)
+            list_widget.setCurrentRow(list_widget.count() - 1)
+
+        def delete_selected_profile() -> None:
+            index = selected_profile_index()
+            if index < 0:
+                return
+            if len(profiles_working) <= 1:
+                QMessageBox.warning(
+                    dialog,
+                    APP_NAME,
+                    "At least one profile must remain.",
+                )
+                return
+            profile = profiles_working[index]
+            answer = QMessageBox.question(
+                dialog,
+                "Delete Profile",
+                f"Delete profile '{profile['label']}'?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            profiles_working.pop(index)
+            row = list_widget.currentRow()
+            if row >= 0:
+                list_widget.takeItem(row)
+            if list_widget.count() > 0:
+                list_widget.setCurrentRow(max(0, min(row, list_widget.count() - 1)))
+
+        rename_button.clicked.connect(rename_selected_profile)
+        duplicate_button.clicked.connect(duplicate_selected_profile)
+        delete_button.clicked.connect(delete_selected_profile)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        root_layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        sync_profiles_from_list()
+        selected_row = list_widget.currentRow()
+        selected_key = self._batch_export_profile_key
+        if 0 <= selected_row < list_widget.count():
+            item = list_widget.item(selected_row)
+            if item is not None:
+                key = item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(key, str) and key.strip():
+                    selected_key = key.strip()
+        self.set_batch_export_profiles(
+            profiles_working,
+            selected_key=selected_key,
+            emit_signal=True,
+        )
+
+    def export_batch_with_dialog(self) -> None:
+        """
+        Opens a dialog to export the current tab in multiple formats.
+
+        Returns:
+            None
+        """
+
+        start_dir = self._batch_export_last_directory
+        if not start_dir and self._current_project_path:
+            start_dir = str(Path(self._current_project_path).resolve().parent)
+        directory_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Batch Export Folder",
+            start_dir,
+        )
+        if not directory_path:
+            return
+        self.set_batch_export_last_directory(directory_path, emit_signal=True)
+
+        default_base = "snappix-export"
+        if self._current_project_path:
+            default_base = Path(self._current_project_path).stem
+
+        base_name, accepted = QInputDialog.getText(
+            self,
+            "Batch Export",
+            "Base file name:",
+            QLineEdit.EchoMode.Normal,
+            default_base,
+        )
+        if not accepted:
+            return
+
+        export_options = self._ask_batch_export_options(
+            current_profile=self._selected_batch_profile_definition(),
+            profiles=self.batch_export_profiles(),
+        )
+        if export_options is None:
+            return
+        include_png = bool(export_options["include_png"])
+        include_jpg = bool(export_options["include_jpg"])
+        include_pdf = bool(export_options["include_pdf"])
+        self._jpeg_quality = int(export_options["jpg_quality"])
+        self._pdf_dpi = int(export_options["pdf_dpi"])
+        selected_profile_key = str(export_options["selected_profile_key"])
+        custom_profile_name = str(export_options["save_profile_name"]).strip()
+        self._batch_export_profile_key = self._normalize_batch_profile_key(selected_profile_key)
+        if custom_profile_name:
+            custom_key = self._normalize_batch_profile_key(custom_profile_name)
+            updated_profile = {
+                "key": custom_key,
+                "label": custom_profile_name,
+                "formats": [
+                    fmt
+                    for fmt, enabled in (
+                        ("png", include_png),
+                        ("jpg", include_jpg),
+                        ("pdf", include_pdf),
+                    )
+                    if enabled
+                ],
+                "jpg_quality": self._jpeg_quality,
+                "pdf_dpi": self._pdf_dpi,
+            }
+            merged = [profile for profile in self._batch_export_profiles if profile["key"] != custom_key]
+            merged.append(updated_profile)
+            self.set_batch_export_profiles(
+                merged,
+                selected_key=custom_key,
+                emit_signal=True,
+            )
+        else:
+            self.set_batch_export_profiles(
+                self._batch_export_profiles,
+                selected_key=self._batch_export_profile_key,
+                emit_signal=True,
+            )
+
+        normalized_base = base_name.strip() or default_base
+        target_root = Path(directory_path)
+        pixmap = self.canvas.export_composited_pixmap()
+        if pixmap.isNull():
+            QMessageBox.warning(self, APP_NAME, "Could not render image for batch export.")
+            return
+
+        queue: list[tuple[str, Path]] = []
+        if include_png:
+            queue.append(("png", target_root / f"{normalized_base}.png"))
+        if include_jpg:
+            queue.append(("jpg", target_root / f"{normalized_base}.jpg"))
+        if include_pdf:
+            queue.append(("pdf", target_root / f"{normalized_base}.pdf"))
+
+        progress = QProgressDialog(
+            "Starting batch export...",
+            "Cancel",
+            0,
+            len(queue),
+            self,
+        )
+        progress.setWindowTitle("Batch Export")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        saved_targets: list[str] = []
+        for index, (fmt, target) in enumerate(queue, start=1):
+            progress.setLabelText(f"Exporting {fmt.upper()} ({index}/{len(queue)})...")
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                break
+            if fmt == "png":
+                if pixmap.save(str(target), "PNG"):
+                    saved_targets.append(str(target))
+            elif fmt == "jpg":
+                if pixmap.save(str(target), "JPG", max(1, min(100, self._jpeg_quality))):
+                    saved_targets.append(str(target))
+            else:
+                self._write_pdf_to_path(str(target), max(72, min(1200, self._pdf_dpi)))
+                if target.is_file():
+                    saved_targets.append(str(target))
+            progress.setValue(index)
+            QApplication.processEvents()
+
+        progress.close()
+
+        if not saved_targets:
+            if progress.wasCanceled():
+                self.statusBar().showMessage("Batch export cancelled.", 2500)
+            else:
+                QMessageBox.warning(self, APP_NAME, "Batch export failed.")
+            return
+        self.statusBar().showMessage(
+            f"Batch export complete ({len(saved_targets)} files)",
+            3500,
+        )
+
+    def _ask_batch_export_options(
+        self,
+        current_profile: dict[str, Any],
+        profiles: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """
+        Prompts for target formats and profile settings used by batch export.
+
+        Args:
+            current_profile: Currently selected profile definition.
+            profiles: Available saved profiles.
+
+        Returns:
+            dict[str, Any] | None: Selected batch export settings.
+        """
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Batch Export Formats")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        profile_combo = QComboBox()
+        for profile in profiles:
+            profile_combo.addItem(str(profile["label"]), str(profile["key"]))
+        selected_index = profile_combo.findData(str(current_profile["key"]))
+        if selected_index >= 0:
+            profile_combo.setCurrentIndex(selected_index)
+        layout.addWidget(QLabel("Profile"))
+        layout.addWidget(profile_combo)
+
+        layout.addWidget(QLabel("Choose formats to export:"))
+        png_check = QCheckBox("PNG")
+        png_check.setChecked("png" in list(current_profile.get("formats", [])))
+        jpg_check = QCheckBox("JPEG")
+        jpg_check.setChecked("jpg" in list(current_profile.get("formats", [])))
+        pdf_check = QCheckBox("PDF")
+        pdf_check.setChecked("pdf" in list(current_profile.get("formats", [])))
+        layout.addWidget(png_check)
+        layout.addWidget(jpg_check)
+        layout.addWidget(pdf_check)
+
+        quality_row = QHBoxLayout()
+        quality_row.setSpacing(6)
+        quality_row.addWidget(QLabel("JPG"))
+        jpg_quality_spin = QSpinBox()
+        jpg_quality_spin.setRange(1, 100)
+        jpg_quality_spin.setValue(int(current_profile.get("jpg_quality", self._jpeg_quality)))
+        quality_row.addWidget(jpg_quality_spin)
+        quality_row.addWidget(QLabel("PDF DPI"))
+        pdf_dpi_spin = QSpinBox()
+        pdf_dpi_spin.setRange(72, 1200)
+        pdf_dpi_spin.setValue(int(current_profile.get("pdf_dpi", self._pdf_dpi)))
+        quality_row.addWidget(pdf_dpi_spin)
+        quality_row.addStretch(1)
+        layout.addLayout(quality_row)
+
+        save_profile_name_edit = QLineEdit()
+        save_profile_name_edit.setPlaceholderText("Optional: save current options as profile name")
+        layout.addWidget(save_profile_name_edit)
+
+        profile_map = {
+            str(profile["key"]): dict(profile)
+            for profile in profiles
+        }
+
+        def on_profile_changed() -> None:
+            selected_key = str(profile_combo.currentData() or "")
+            selected_profile = profile_map.get(selected_key)
+            if selected_profile is None:
+                return
+            selected_formats = list(selected_profile.get("formats", []))
+            png_check.setChecked("png" in selected_formats)
+            jpg_check.setChecked("jpg" in selected_formats)
+            pdf_check.setChecked("pdf" in selected_formats)
+            jpg_quality_spin.setValue(int(selected_profile.get("jpg_quality", 90)))
+            pdf_dpi_spin.setValue(int(selected_profile.get("pdf_dpi", 300)))
+
+        profile_combo.currentIndexChanged.connect(lambda _index: on_profile_changed())
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        include_png = bool(png_check.isChecked())
+        include_jpg = bool(jpg_check.isChecked())
+        include_pdf = bool(pdf_check.isChecked())
+        if not any((include_png, include_jpg, include_pdf)):
+            QMessageBox.warning(self, APP_NAME, "Select at least one format.")
+            return None
+        selected_profile_key = str(profile_combo.currentData() or current_profile["key"])
+        return {
+            "include_png": include_png,
+            "include_jpg": include_jpg,
+            "include_pdf": include_pdf,
+            "jpg_quality": int(jpg_quality_spin.value()),
+            "pdf_dpi": int(pdf_dpi_spin.value()),
+            "selected_profile_key": self._normalize_batch_profile_key(selected_profile_key),
+            "save_profile_name": save_profile_name_edit.text(),
+        }
+
     def print_image(self) -> None:
         """
         Opens a print dialog and prints composited image.
@@ -2595,10 +3937,100 @@ class EditorWindow(QMainWindow):
             None
         """
 
-        pixmap = self.canvas.export_composited_pixmap()
+        mime_data = self._build_canvas_clipboard_mime_data()
+        QGuiApplication.clipboard().setMimeData(mime_data)
+        self.statusBar().showMessage("Drawing area copied to clipboard")
+
+    def copy_drawing_area_to_clipboard(self) -> None:
+        """
+        Copies the full editable drawing area to clipboard for cross-tab paste.
+
+        Returns:
+            None
+        """
+
+        mime_data = self._build_canvas_clipboard_mime_data()
+        QGuiApplication.clipboard().setMimeData(mime_data)
+        self.statusBar().showMessage("Drawing area copied for cross-tab paste", 2500)
+
+    def _build_canvas_clipboard_mime_data(self) -> QMimeData:
+        """
+        Builds clipboard payload containing Snappix canvas and image data.
+
+        Returns:
+            QMimeData: Clipboard object with custom and image formats.
+        """
+
+        payload = {
+            "screenshot_png_base64": pixmap_to_base64_png(self.canvas.screenshot()),
+            "annotations": [
+                annotation.to_dict()
+                for annotation in self.canvas.collect_annotations()
+            ],
+        }
+        encoded = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        composited = self.canvas.export_composited_pixmap()
+        image_bytes = QByteArray()
+        buffer = QBuffer(image_bytes)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        composited.save(buffer, "PNG")
+        buffer.close()
+
+        mime_data = QMimeData()
+        mime_data.setData(_CANVAS_CLIPBOARD_MIME, encoded)
+        mime_data.setData("image/png", bytes(image_bytes))
+        mime_data.setImageData(composited.toImage())
+        return mime_data
+
+    def paste_drawing_area_from_clipboard(self) -> bool:
+        """
+        Pastes a copied drawing area from another tab into this tab.
+
+        Returns:
+            bool: True when a drawing area payload was pasted.
+        """
+
         clipboard = QGuiApplication.clipboard()
-        clipboard.setPixmap(pixmap)
-        self.statusBar().showMessage("Image copied to clipboard")
+        mime_data = clipboard.mimeData()
+        if mime_data is None or not mime_data.hasFormat(_CANVAS_CLIPBOARD_MIME):
+            return False
+        raw_data = bytes(mime_data.data(_CANVAS_CLIPBOARD_MIME))
+        try:
+            payload = json.loads(raw_data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        screenshot_data = payload.get("screenshot_png_base64")
+        annotations_data = payload.get("annotations")
+        if not isinstance(screenshot_data, str) or not isinstance(annotations_data, list):
+            return False
+        annotations = [
+            AnnotationModel.from_dict(item)
+            for item in annotations_data
+            if isinstance(item, dict)
+        ]
+        source_screenshot = base64_png_to_pixmap(screenshot_data)
+        if source_screenshot.isNull():
+            return False
+        if not self.canvas.merge_canvas_payload(source_screenshot, annotations):
+            return False
+        self._refresh_layer_panel()
+        self.statusBar().showMessage(
+            f"Drawing area pasted ({len(annotations)} annotations)",
+            2500,
+        )
+        return True
+
+    def paste_from_clipboard(self) -> None:
+        """
+        Pastes clipboard content, preferring Snappix drawing area payloads.
+
+        Returns:
+            None
+        """
+
+        if self.paste_drawing_area_from_clipboard():
+            return
+        self.canvas.paste_from_clipboard()
 
     def show_about(self) -> None:
         """
@@ -2641,9 +4073,13 @@ class EditorWindow(QMainWindow):
             "Ctrl+O: Open project\n"
             "Ctrl+Z: Undo\n"
             "Ctrl+Y / Ctrl+Shift+Z: Redo\n"
-            "Ctrl+C: Copy composited image\n"
+            "Ctrl+C: Copy drawing area and composited image\n"
+            "Ctrl+Shift+C: Copy drawing area (for another tab)\n"
             "Ctrl+V: Paste text/image/image file/image URL\n"
+            "Ctrl+Shift+V: Paste drawing area from another tab\n"
             "Ctrl + Mouse Wheel: Zoom\n"
+            "Arrow keys: Nudge selected layer by 1 px\n"
+            "Shift+Arrow keys: Nudge selected layer by 10 px\n"
             "Enter: Apply crop selection\n"
             "Esc: Cancel crop selection or capture overlays\n\n"
             "Project shortcuts:\n"
@@ -2670,9 +4106,13 @@ class EditorWindow(QMainWindow):
             "Ctrl+O  - Open project\n"
             "Ctrl+Z  - Undo\n"
             "Ctrl+Y / Ctrl+Shift+Z  - Redo\n"
-            "Ctrl+C  - Copy composited image\n"
+            "Ctrl+C  - Copy drawing area and composited image\n"
+            "Ctrl+Shift+C  - Copy drawing area (cross-tab)\n"
             "Ctrl+V  - Paste text/image/image file/image URL\n"
+            "Ctrl+Shift+V  - Paste drawing area (cross-tab)\n"
             "Ctrl+Mouse Wheel  - Zoom in/out\n"
+            "Arrow keys  - Nudge selection by 1 px\n"
+            "Shift+Arrow keys  - Nudge selection by 10 px\n"
             "Enter  - Apply crop\n"
             "Esc  - Cancel crop or capture overlay\n",
         )
@@ -2778,6 +4218,35 @@ class EditorWindow(QMainWindow):
 
         self._minimize_to_tray_on_close = enabled
 
+    def has_drawn_annotations(self) -> bool:
+        """
+        Indicates whether this tab currently contains annotations.
+
+        Returns:
+            bool: True when at least one annotation exists.
+        """
+
+        return len(self.canvas.collect_annotations()) > 0
+
+    def confirm_close_if_needed(self) -> bool:
+        """
+        Requests close confirmation when this tab has drawn annotations.
+
+        Returns:
+            bool: True when tab may be closed.
+        """
+
+        if not self.has_drawn_annotations():
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Close Tab",
+            "This tab contains annotations. Close it anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def closeEvent(self, event) -> None:
         """
         Handles close button behavior for tray minimization.
@@ -2791,6 +4260,9 @@ class EditorWindow(QMainWindow):
 
         if self._minimize_to_tray_on_close:
             self.close_requested.emit()
+            event.ignore()
+            return
+        if not self.confirm_close_if_needed():
             event.ignore()
             return
         super().closeEvent(event)

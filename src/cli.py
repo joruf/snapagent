@@ -17,6 +17,48 @@ from src.capture import CaptureMode, CaptureRequest, capture_full_screen, execut
 from src.editor_canvas import EditorCanvas
 from src.storage import base64_png_to_pixmap, load_project
 
+EXPORT_PRESET_WEB = "web"
+EXPORT_PRESET_DOCS = "docs"
+EXPORT_PRESET_PRINT = "print"
+EXPORT_PRESET_LIGHTWEIGHT = "lightweight"
+
+
+def export_preset_choices() -> list[str]:
+    """
+    Returns supported export preset identifiers.
+
+    Returns:
+        list[str]: Preset names for CLI choices.
+    """
+
+    return [
+        EXPORT_PRESET_WEB,
+        EXPORT_PRESET_DOCS,
+        EXPORT_PRESET_PRINT,
+        EXPORT_PRESET_LIGHTWEIGHT,
+    ]
+
+
+def resolve_export_preset(name: str) -> tuple[int, int]:
+    """
+    Resolves JPEG quality and PDF DPI defaults for one preset.
+
+    Args:
+        name: Preset identifier.
+
+    Returns:
+        tuple[int, int]: JPEG quality and PDF DPI defaults.
+    """
+
+    normalized = name.strip().lower()
+    if normalized == EXPORT_PRESET_WEB:
+        return 82, 150
+    if normalized == EXPORT_PRESET_PRINT:
+        return 96, 600
+    if normalized == EXPORT_PRESET_LIGHTWEIGHT:
+        return 72, 120
+    return 90, 300
+
 
 def build_cli_parser() -> argparse.ArgumentParser:
     """
@@ -68,16 +110,63 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument("--output", required=True, help="Output file path")
     export_parser.add_argument(
+        "--preset",
+        choices=export_preset_choices(),
+        default=EXPORT_PRESET_DOCS,
+        help="Export quality preset",
+    )
+    export_parser.add_argument(
         "--jpg-quality",
         type=int,
-        default=90,
+        default=-1,
         help="JPEG quality (1-100)",
     )
     export_parser.add_argument(
         "--pdf-dpi",
         type=int,
-        default=300,
+        default=-1,
         help="PDF resolution (72-1200)",
+    )
+
+    batch_export_parser = subparsers.add_parser(
+        "batch-export",
+        help="Export multiple .sfp projects into one output folder",
+    )
+    batch_export_parser.add_argument(
+        "--project",
+        action="append",
+        required=True,
+        help="Project path (repeat for multiple projects)",
+    )
+    batch_export_parser.add_argument(
+        "--formats",
+        nargs="+",
+        choices=["png", "jpg", "pdf"],
+        default=["png", "jpg", "pdf"],
+        help="Formats to export",
+    )
+    batch_export_parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Output directory for exported files",
+    )
+    batch_export_parser.add_argument(
+        "--preset",
+        choices=export_preset_choices(),
+        default=EXPORT_PRESET_DOCS,
+        help="Export quality preset",
+    )
+    batch_export_parser.add_argument(
+        "--jpg-quality",
+        type=int,
+        default=-1,
+        help="Optional JPEG quality override (1-100)",
+    )
+    batch_export_parser.add_argument(
+        "--pdf-dpi",
+        type=int,
+        default=-1,
+        help="Optional PDF DPI override (72-1200)",
     )
 
     open_parser = subparsers.add_parser("open", help="Open editor with project")
@@ -131,12 +220,42 @@ def run_cli(
                 copy_to_clipboard=bool(args.clipboard),
             )
         if args.command == "export":
+            preset_jpg_quality, preset_pdf_dpi = resolve_export_preset(str(args.preset))
+            resolved_jpg_quality = (
+                int(args.jpg_quality)
+                if int(args.jpg_quality) > 0
+                else preset_jpg_quality
+            )
+            resolved_pdf_dpi = (
+                int(args.pdf_dpi)
+                if int(args.pdf_dpi) > 0
+                else preset_pdf_dpi
+            )
             return _run_export_command(
                 project_path=str(args.project),
                 output_path=str(args.output),
                 fmt=str(args.format),
-                jpg_quality=int(args.jpg_quality),
-                pdf_dpi=int(args.pdf_dpi),
+                jpg_quality=resolved_jpg_quality,
+                pdf_dpi=resolved_pdf_dpi,
+            )
+        if args.command == "batch-export":
+            preset_jpg_quality, preset_pdf_dpi = resolve_export_preset(str(args.preset))
+            resolved_jpg_quality = (
+                int(args.jpg_quality)
+                if int(args.jpg_quality) > 0
+                else preset_jpg_quality
+            )
+            resolved_pdf_dpi = (
+                int(args.pdf_dpi)
+                if int(args.pdf_dpi) > 0
+                else preset_pdf_dpi
+            )
+            return _run_batch_export_command(
+                projects=[str(value) for value in list(args.project)],
+                output_dir=str(args.output_dir),
+                formats=[str(value) for value in list(args.formats)],
+                jpg_quality=resolved_jpg_quality,
+                pdf_dpi=resolved_pdf_dpi,
             )
         parser.print_help()
         return 1
@@ -296,6 +415,65 @@ def _run_export_command(
         print(f"Export failed: could not write PDF: {target}")
         return 2
     print(target)
+    return 0
+
+
+def _run_batch_export_command(
+    projects: list[str],
+    output_dir: str,
+    formats: list[str],
+    jpg_quality: int,
+    pdf_dpi: int,
+) -> int:
+    """
+    Handles the `batch-export` CLI command.
+
+    Args:
+        projects: Source project file paths.
+        output_dir: Target directory path.
+        formats: Export formats for each project.
+        jpg_quality: JPEG quality value.
+        pdf_dpi: PDF DPI value.
+
+    Returns:
+        int: Command exit code.
+    """
+
+    resolved_formats = [fmt.lower().strip() for fmt in formats if fmt.strip()]
+    if not resolved_formats:
+        print("Batch export failed: no export formats selected.")
+        return 2
+
+    target_dir = Path(output_dir).expanduser().resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    exported_count = 0
+    had_error = False
+    for project_value in projects:
+        project_path = Path(project_value).expanduser().resolve()
+        if not project_path.is_file():
+            print(f"Batch export warning: project not found: {project_path}")
+            had_error = True
+            continue
+
+        for fmt in resolved_formats:
+            destination_base = target_dir / project_path.stem
+            result = _run_export_command(
+                project_path=str(project_path),
+                output_path=str(destination_base),
+                fmt=fmt,
+                jpg_quality=jpg_quality,
+                pdf_dpi=pdf_dpi,
+            )
+            if result != 0:
+                had_error = True
+                continue
+            exported_count += 1
+
+    if exported_count <= 0:
+        return 2
+    if had_error:
+        return 3
+    print(f"Batch export complete: {exported_count} files.")
     return 0
 
 

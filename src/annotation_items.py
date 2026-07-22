@@ -8,6 +8,7 @@ import base64
 import math
 from dataclasses import dataclass
 from typing import cast
+from uuid import uuid4
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform
@@ -25,6 +26,8 @@ from src.annotation_shapes import TEXT_STYLE_PLAIN
 from src.models import AnnotationModel
 
 ITEM_ROLE_TYPE = 1001
+ITEM_ROLE_ID = 1002
+ITEM_ROLE_LOCKED = 1003
 
 STROKE_STYLE_SOLID = "solid"
 STROKE_STYLE_DASH = "dash"
@@ -83,6 +86,10 @@ class StyleState:
         font_bold: Bold style for text annotations.
         font_italic: Italic style for text annotations.
         font_underline: Underline style for text annotations.
+        letter_spacing: Additional letter spacing in pixels.
+        line_spacing_factor: Line spacing multiplier for multiline text.
+        box_padding: Text container padding in pixels.
+        corner_radius: Rounded container corner radius in pixels.
         stroke_style: Line style for line and arrow annotations.
         text_style: Container style for text annotations.
     """
@@ -96,6 +103,10 @@ class StyleState:
     font_bold: bool
     font_italic: bool
     font_underline: bool
+    letter_spacing: float = 0.0
+    line_spacing_factor: float = 1.2
+    box_padding: float = 10.0
+    corner_radius: float = 6.0
     stroke_style: str = STROKE_STYLE_SOLID
     text_style: str = TEXT_STYLE_PLAIN
 
@@ -230,6 +241,10 @@ def configure_graphics_item(item: QGraphicsItem, annotation_type: str) -> None:
     item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
     item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
     item.setData(ITEM_ROLE_TYPE, annotation_type)
+    if not item.data(ITEM_ROLE_ID):
+        item.setData(ITEM_ROLE_ID, uuid4().hex)
+    if item.data(ITEM_ROLE_LOCKED) is None:
+        item.setData(ITEM_ROLE_LOCKED, False)
 
 
 def annotation_from_item(item: QGraphicsItem) -> AnnotationModel | None:
@@ -316,7 +331,11 @@ def annotation_from_item(item: QGraphicsItem) -> AnnotationModel | None:
             font_bold=text_item.font().bold(),
             font_italic=text_item.font().italic(),
             font_underline=text_item.font().underline(),
-            payload={"text_style": TEXT_STYLE_PLAIN, "z_index": item.zValue()},
+            payload={
+                "text_style": TEXT_STYLE_PLAIN,
+                "letter_spacing": float(text_item.font().letterSpacing()),
+                "z_index": item.zValue(),
+            },
         )
 
     if annotation_type == "image":
@@ -413,6 +432,10 @@ def add_annotation_to_scene(
         font.setBold(annotation.font_bold)
         font.setItalic(annotation.font_italic)
         font.setUnderline(annotation.font_underline)
+        font.setLetterSpacing(
+            QFont.SpacingType.AbsoluteSpacing,
+            float(annotation.payload.get("letter_spacing", 0.0)),
+        )
         item.setFont(font)
         item.setDefaultTextColor(stroke)
         item.setPos(annotation.x, annotation.y)

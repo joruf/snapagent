@@ -59,6 +59,7 @@ class TestSettingsDialog(unittest.TestCase):
             dialog.editor_last_tab_combo.findData(EDITOR_LAST_TAB_CLOSE_WINDOW)
         )
         dialog.save_directory_edit.setText("  /home/user/Pictures  ")
+        dialog.auto_crop_on_shrink_checkbox.setChecked(False)
 
         config = dialog.build_config()
         self.assertTrue(config.hotkeys_enabled)
@@ -68,6 +69,7 @@ class TestSettingsDialog(unittest.TestCase):
         self.assertEqual(config.post_capture_action, POST_CAPTURE_CLIPBOARD)
         self.assertEqual(config.capture_save_directory, "/home/user/Pictures")
         self.assertEqual(config.editor_last_tab_behavior, EDITOR_LAST_TAB_CLOSE_WINDOW)
+        self.assertFalse(config.auto_crop_on_shrink)
 
     def test_build_config_preserves_autostart_and_theme(self) -> None:
         """

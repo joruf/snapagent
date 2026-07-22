@@ -8,7 +8,7 @@ import math
 from typing import cast
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
@@ -146,6 +146,10 @@ class StyledTextItem(QGraphicsItem):
         fill_color: QColor | None = None,
         stroke_color: QColor | None = None,
         stroke_width: float = 2.0,
+        letter_spacing: float = 0.0,
+        line_spacing_factor: float = 1.2,
+        box_padding: float = 10.0,
+        corner_radius: float = 6.0,
     ) -> None:
         """
         Initializes one styled text annotation item.
@@ -158,6 +162,10 @@ class StyledTextItem(QGraphicsItem):
             fill_color: Background fill color.
             stroke_color: Border color.
             stroke_width: Border width.
+            letter_spacing: Letter spacing in pixels.
+            line_spacing_factor: Line spacing multiplier.
+            box_padding: Container/text inset padding in pixels.
+            corner_radius: Rounded corner radius in pixels.
         """
 
         super().__init__()
@@ -168,6 +176,10 @@ class StyledTextItem(QGraphicsItem):
         self._fill_color = fill_color or QColor(255, 255, 255, 230)
         self._stroke_color = stroke_color or QColor(52, 73, 94, 255)
         self._stroke_width = stroke_width
+        self._letter_spacing = float(letter_spacing)
+        self._line_spacing_factor = max(0.7, float(line_spacing_factor))
+        self._box_padding = max(0.0, float(box_padding))
+        self._corner_radius = max(0.0, float(corner_radius))
         self._text_rect = QRectF()
         self._bounds = QRectF()
         self._rebuild_metrics()
@@ -249,6 +261,77 @@ class StyledTextItem(QGraphicsItem):
             self._stroke_color = stroke_color
         self.update()
 
+    def set_layout_options(
+        self,
+        letter_spacing: float | None = None,
+        line_spacing_factor: float | None = None,
+        box_padding: float | None = None,
+        corner_radius: float | None = None,
+    ) -> None:
+        """
+        Updates text spacing and container geometry options.
+
+        Args:
+            letter_spacing: Optional letter spacing in pixels.
+            line_spacing_factor: Optional line spacing multiplier.
+            box_padding: Optional text/container padding in pixels.
+            corner_radius: Optional rounded corner radius in pixels.
+
+        Returns:
+            None
+        """
+
+        if letter_spacing is not None:
+            self._letter_spacing = float(letter_spacing)
+        if line_spacing_factor is not None:
+            self._line_spacing_factor = max(0.7, float(line_spacing_factor))
+        if box_padding is not None:
+            self._box_padding = max(0.0, float(box_padding))
+        if corner_radius is not None:
+            self._corner_radius = max(0.0, float(corner_radius))
+        self._rebuild_metrics()
+        self.update()
+
+    def letter_spacing(self) -> float:
+        """
+        Returns the active letter spacing.
+
+        Returns:
+            float: Letter spacing in pixels.
+        """
+
+        return self._letter_spacing
+
+    def line_spacing_factor(self) -> float:
+        """
+        Returns the active line-spacing multiplier.
+
+        Returns:
+            float: Line spacing multiplier.
+        """
+
+        return self._line_spacing_factor
+
+    def box_padding(self) -> float:
+        """
+        Returns the active box padding.
+
+        Returns:
+            float: Padding in pixels.
+        """
+
+        return self._box_padding
+
+    def corner_radius(self) -> float:
+        """
+        Returns the active corner radius.
+
+        Returns:
+            float: Corner radius in pixels.
+        """
+
+        return self._corner_radius
+
     def boundingRect(self) -> QRectF:
         """
         Returns the item bounds.
@@ -277,10 +360,15 @@ class StyledTextItem(QGraphicsItem):
             None
         """
 
-        painter.setFont(self._font)
+        draw_font = QFont(self._font)
+        draw_font.setLetterSpacing(
+            QFont.SpacingType.AbsoluteSpacing,
+            self._letter_spacing,
+        )
+        painter.setFont(draw_font)
         if self._text_style == TEXT_STYLE_PLAIN:
             painter.setPen(self._text_color)
-            painter.drawText(self._text_rect, int(Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap), self._text)
+            self._draw_multiline_text(painter)
             return
 
         path = self._container_path()
@@ -288,7 +376,7 @@ class StyledTextItem(QGraphicsItem):
         painter.setBrush(QBrush(self._fill_color))
         painter.drawPath(path)
         painter.setPen(self._text_color)
-        painter.drawText(self._text_rect, int(Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap), self._text)
+        self._draw_multiline_text(painter)
 
     def _rebuild_metrics(self) -> None:
         """
@@ -298,16 +386,57 @@ class StyledTextItem(QGraphicsItem):
             None
         """
 
-        metrics = QFont(self._font)
-        painter_path = QPainterPath()
-        painter_path.addText(QPointF(0.0, 0.0), metrics, self._text)
-        raw_bounds = painter_path.boundingRect()
-        padding = 10.0 if self._text_style != TEXT_STYLE_PLAIN else 0.0
-        self._text_rect = raw_bounds.adjusted(padding, padding, padding, padding)
-        self._bounds = self._text_rect
+        layout_font = QFont(self._font)
+        layout_font.setLetterSpacing(
+            QFont.SpacingType.AbsoluteSpacing,
+            self._letter_spacing,
+        )
+        metrics = QFontMetricsF(layout_font)
+        lines = self._text.splitlines() or [self._text]
+        if not lines:
+            lines = [""]
+        max_width = max((metrics.horizontalAdvance(line) for line in lines), default=0.0)
+        line_height = metrics.height()
+        line_spacing = max(line_height, line_height * self._line_spacing_factor)
+        text_height = line_height + max(0, len(lines) - 1) * line_spacing
+        raw_bounds = QRectF(0.0, 0.0, max(2.0, max_width), max(2.0, text_height))
+        padding = self._box_padding if self._text_style != TEXT_STYLE_PLAIN else 0.0
+        text_origin_x = padding
+        text_origin_y = padding
+        self.prepareGeometryChange()
+        self._text_rect = QRectF(
+            text_origin_x,
+            text_origin_y,
+            raw_bounds.width(),
+            raw_bounds.height(),
+        )
+        self._bounds = QRectF(
+            0.0,
+            0.0,
+            self._text_rect.right() + padding,
+            self._text_rect.bottom() + padding,
+        )
         if self._text_style == TEXT_STYLE_BUBBLE:
             self._bounds = self._bounds.adjusted(0.0, 0.0, 0.0, 14.0)
-        self.prepareGeometryChange()
+
+    def _draw_multiline_text(self, painter: QPainter) -> None:
+        """
+        Draws text with explicit line spacing and letter spacing.
+
+        Args:
+            painter: Active painter.
+
+        Returns:
+            None
+        """
+
+        draw_font = painter.font()
+        metrics = QFontMetricsF(draw_font)
+        line_height = metrics.height()
+        line_spacing = max(line_height, line_height * self._line_spacing_factor)
+        y_base = self._text_rect.top() + metrics.ascent()
+        for index, line in enumerate(self._text.splitlines() or [self._text]):
+            painter.drawText(QPointF(self._text_rect.left(), y_base + index * line_spacing), line)
 
     def _container_path(self) -> QPainterPath:
         """
@@ -320,10 +449,11 @@ class StyledTextItem(QGraphicsItem):
         rect = self._text_rect.adjusted(-2.0, -2.0, 2.0, 2.0)
         if self._text_style == TEXT_STYLE_BOX:
             path = QPainterPath()
-            path.addRoundedRect(rect, 6.0, 6.0)
+            radius = max(0.0, min(self._corner_radius, min(rect.width(), rect.height()) * 0.5))
+            path.addRoundedRect(rect, radius, radius)
             return path
 
-        radius = min(rect.width(), rect.height()) * 0.18
+        radius = max(2.0, min(self._corner_radius, min(rect.width(), rect.height()) * 0.5))
         tail_width = min(18.0, rect.width() * 0.22)
         tail_height = 14.0
         bubble_rect = rect.adjusted(0.0, 0.0, 0.0, -tail_height)
@@ -394,7 +524,13 @@ def annotation_from_styled_text_item(item: StyledTextItem) -> AnnotationModel:
         font_bold=font.bold(),
         font_italic=font.italic(),
         font_underline=font.underline(),
-        payload={"text_style": item.text_style()},
+        payload={
+            "text_style": item.text_style(),
+            "letter_spacing": item.letter_spacing(),
+            "line_spacing_factor": item.line_spacing_factor(),
+            "box_padding": item.box_padding(),
+            "corner_radius": item.corner_radius(),
+        },
     )
 
 
@@ -445,6 +581,10 @@ def add_styled_text_to_scene(scene: QGraphicsScene, annotation: AnnotationModel)
         fill_color=QColor(*annotation.fill_rgba),
         stroke_color=QColor(*annotation.stroke_rgba),
         stroke_width=annotation.stroke_width,
+        letter_spacing=float(annotation.payload.get("letter_spacing", 0.0)),
+        line_spacing_factor=float(annotation.payload.get("line_spacing_factor", 1.2)),
+        box_padding=float(annotation.payload.get("box_padding", 10.0)),
+        corner_radius=float(annotation.payload.get("corner_radius", 6.0)),
     )
     item.setPos(annotation.x, annotation.y)
     scene.addItem(item)
