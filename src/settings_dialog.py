@@ -4,8 +4,8 @@ Application settings dialog.
 
 from __future__ import annotations
 
-from pathlib import Path
-
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -14,9 +14,15 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QHeaderView,
+    QKeySequenceEdit,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -25,11 +31,21 @@ from src.config import (
     EDITOR_LAST_TAB_BEHAVIORS,
     POST_CAPTURE_ACTIONS,
     AppConfig,
+    default_capture_save_directory,
     normalize_editor_last_tab_behavior,
     normalize_hotkey_spec,
     normalize_post_capture_action,
+    sanitize_editor_shortcut_map,
 )
 from src.global_hotkeys import GlobalHotkeyManager, hotkey_spec_to_pynput
+from src.shortcuts import (
+    EDITOR_SHORTCUT_DEFINITIONS,
+    find_shortcut_conflicts,
+    is_valid_shortcut_spec,
+    normalize_editor_shortcuts,
+    resolved_shortcut_text,
+    shortcut_spec_to_sequences,
+)
 
 
 class SettingsDialog(QDialog):
@@ -49,10 +65,49 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Snappix Settings")
         self.setModal(True)
-        self.resize(520, 360)
+        self.resize(640, 520)
         self._config = config
+        self._shortcut_edits: dict[str, QKeySequenceEdit] = {}
 
         root_layout = QVBoxLayout(self)
+        tabs = QTabWidget(self)
+        tabs.addTab(self._build_general_tab(config), "General")
+        tabs.addTab(self._build_shortcuts_tab(config), "Editor Shortcuts")
+        root_layout.addWidget(tabs)
+
+        if not GlobalHotkeyManager.is_supported():
+            warning = QMessageBox(self)
+            warning.setIcon(QMessageBox.Icon.Warning)
+            warning.setWindowTitle("Global Hotkeys")
+            warning.setText(
+                "The pynput package is not installed. Global hotkeys stay disabled "
+                "until dependencies are updated."
+            )
+            warning.setStandardButtons(QMessageBox.StandardButton.Ok)
+            warning.show()
+            self.hotkeys_enabled_checkbox.setChecked(False)
+            self.hotkeys_enabled_checkbox.setEnabled(False)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept_settings)
+        buttons.rejected.connect(self.reject)
+        root_layout.addWidget(buttons)
+
+    def _build_general_tab(self, config: AppConfig) -> QWidget:
+        """
+        Builds the general settings tab.
+
+        Args:
+            config: Current application configuration.
+
+        Returns:
+            QWidget: General settings page.
+        """
+
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
         form = QFormLayout()
 
         self.hotkeys_enabled_checkbox = QCheckBox("Enable global hotkeys")
@@ -106,35 +161,149 @@ class SettingsDialog(QDialog):
         form.addRow("Canvas:", self.auto_crop_on_shrink_checkbox)
 
         save_directory_row = QHBoxLayout()
-        self.save_directory_edit = QLineEdit(config.capture_save_directory)
-        self.save_directory_edit.setPlaceholderText("~/Pictures/Snappix")
+        initial_save_directory = (
+            config.capture_save_directory.strip() or default_capture_save_directory()
+        )
+        self.save_directory_edit = QLineEdit(initial_save_directory)
+        self.save_directory_edit.setPlaceholderText(default_capture_save_directory())
         browse_button = QPushButton("Browse...")
         browse_button.clicked.connect(self._browse_save_directory)
         save_directory_row.addWidget(self.save_directory_edit, 1)
         save_directory_row.addWidget(browse_button)
         form.addRow("Save folder:", save_directory_row)
 
-        root_layout.addLayout(form)
+        layout.addLayout(form)
+        layout.addStretch(1)
+        return page
 
-        if not GlobalHotkeyManager.is_supported():
-            warning = QMessageBox(self)
-            warning.setIcon(QMessageBox.Icon.Warning)
-            warning.setWindowTitle("Global Hotkeys")
-            warning.setText(
-                "The pynput package is not installed. Global hotkeys stay disabled "
-                "until dependencies are updated."
-            )
-            warning.setStandardButtons(QMessageBox.StandardButton.Ok)
-            warning.show()
-            self.hotkeys_enabled_checkbox.setChecked(False)
-            self.hotkeys_enabled_checkbox.setEnabled(False)
+    def _build_shortcuts_tab(self, config: AppConfig) -> QWidget:
+        """
+        Builds the editable editor shortcuts tab.
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        Args:
+            config: Current application configuration.
+
+        Returns:
+            QWidget: Shortcuts settings page.
+        """
+
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        hint = QLabel(
+            "Click a shortcut field and press the desired keys. "
+            "Clear a field to remove the binding. Use Reset to restore defaults."
         )
-        buttons.accepted.connect(self._accept_settings)
-        buttons.rejected.connect(self.reject)
-        root_layout.addWidget(buttons)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.shortcuts_table = QTableWidget(0, 3, page)
+        self.shortcuts_table.setHorizontalHeaderLabels(["Action", "Shortcut", ""])
+        self.shortcuts_table.verticalHeader().setVisible(False)
+        self.shortcuts_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.shortcuts_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        header = self.shortcuts_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.shortcuts_table, 1)
+
+        overrides = normalize_editor_shortcuts(config.editor_shortcuts)
+        for definition in EDITOR_SHORTCUT_DEFINITIONS:
+            row = self.shortcuts_table.rowCount()
+            self.shortcuts_table.insertRow(row)
+
+            label_item = QTableWidgetItem(f"{definition.category}: {definition.label}")
+            label_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.shortcuts_table.setItem(row, 0, label_item)
+
+            editor = QKeySequenceEdit(page)
+            editor.setClearButtonEnabled(True)
+            current_spec = resolved_shortcut_text(definition.action_id, overrides)
+            sequences = shortcut_spec_to_sequences(current_spec)
+            if sequences:
+                editor.setKeySequence(sequences[0])
+            else:
+                editor.clear()
+            self._shortcut_edits[definition.action_id] = editor
+            self.shortcuts_table.setCellWidget(row, 1, editor)
+
+            reset_button = QPushButton("Reset")
+            reset_button.setToolTip(f"Restore default: {definition.default}")
+            reset_button.clicked.connect(
+                lambda _checked=False, action_id=definition.action_id: self._reset_shortcut(
+                    action_id
+                )
+            )
+            self.shortcuts_table.setCellWidget(row, 2, reset_button)
+
+        reset_all_row = QHBoxLayout()
+        reset_all_row.addStretch(1)
+        reset_all_button = QPushButton("Reset All Shortcuts")
+        reset_all_button.clicked.connect(self._reset_all_shortcuts)
+        reset_all_row.addWidget(reset_all_button)
+        layout.addLayout(reset_all_row)
+        return page
+
+    def _reset_shortcut(self, action_id: str) -> None:
+        """
+        Restores one shortcut editor to its default binding.
+
+        Args:
+            action_id: Shortcut action identifier.
+
+        Returns:
+            None
+        """
+
+        editor = self._shortcut_edits.get(action_id)
+        if editor is None:
+            return
+        sequences = shortcut_spec_to_sequences(
+            resolved_shortcut_text(action_id, {})
+        )
+        if sequences:
+            editor.setKeySequence(sequences[0])
+        else:
+            editor.clear()
+
+    def _reset_all_shortcuts(self) -> None:
+        """
+        Restores every editor shortcut field to its default binding.
+
+        Returns:
+            None
+        """
+
+        for action_id in self._shortcut_edits:
+            self._reset_shortcut(action_id)
+
+    def _collect_editor_shortcuts(self) -> dict[str, str]:
+        """
+        Collects shortcut overrides that differ from defaults.
+
+        Returns:
+            dict[str, str]: Persisted override map.
+        """
+
+        overrides: dict[str, str] = {}
+        for definition in EDITOR_SHORTCUT_DEFINITIONS:
+            editor = self._shortcut_edits[definition.action_id]
+            sequence = editor.keySequence()
+            if sequence.isEmpty():
+                current = ""
+            else:
+                current = sequence.toString(QKeySequence.SequenceFormat.PortableText)
+            default_sequences = shortcut_spec_to_sequences(definition.default)
+            default_primary = (
+                default_sequences[0].toString(QKeySequence.SequenceFormat.PortableText)
+                if default_sequences
+                else ""
+            )
+            # Persist only when the primary binding differs from the default primary.
+            # Multi-default actions keep remaining defaults unless explicitly overridden.
+            if current != default_primary:
+                overrides[definition.action_id] = current
+        return normalize_editor_shortcuts(overrides)
 
     def build_config(self) -> AppConfig:
         """
@@ -167,6 +336,7 @@ class SettingsDialog(QDialog):
             batch_export_profile_key=self._config.batch_export_profile_key,
             batch_export_last_directory=self._config.batch_export_last_directory,
             auto_crop_on_shrink=self.auto_crop_on_shrink_checkbox.isChecked(),
+            editor_shortcuts=sanitize_editor_shortcut_map(self._collect_editor_shortcuts()),
         )
 
     def _browse_save_directory(self) -> None:
@@ -178,9 +348,7 @@ class SettingsDialog(QDialog):
         """
 
         current_path = self.save_directory_edit.text().strip()
-        start_dir = str(Path(current_path).expanduser()) if current_path else str(
-            Path.home() / "Pictures"
-        )
+        start_dir = current_path if current_path else default_capture_save_directory()
         selected = QFileDialog.getExistingDirectory(
             self,
             "Select Capture Save Folder",
@@ -208,6 +376,34 @@ class SettingsDialog(QDialog):
                     "Use formats like ctrl+shift+a or ctrl+shift+f1.",
                 )
                 return
+
+        for action_id, editor in self._shortcut_edits.items():
+            sequence = editor.keySequence()
+            spec = (
+                ""
+                if sequence.isEmpty()
+                else sequence.toString(QKeySequence.SequenceFormat.PortableText)
+            )
+            if not is_valid_shortcut_spec(spec):
+                QMessageBox.warning(
+                    self,
+                    "Invalid Shortcut",
+                    f"The shortcut for \"{action_id}\" is invalid.",
+                )
+                return
+
+        # Validate conflicts against the effective resolved map (defaults + overrides).
+        conflicts = find_shortcut_conflicts(candidate.editor_shortcuts)
+        if conflicts:
+            sequence_text, first_id, second_id = conflicts[0]
+            QMessageBox.warning(
+                self,
+                "Shortcut Conflict",
+                f"The shortcut \"{sequence_text}\" is assigned more than once. "
+                "Choose unique bindings for each action.",
+            )
+            return
+
         self._config = candidate
         self.accept()
 

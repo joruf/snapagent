@@ -44,6 +44,7 @@ from src.config import (
     POST_CAPTURE_SAVE,
     AppConfig,
     ConfigManager,
+    default_capture_save_directory,
     normalize_export_preset,
 )
 from src.constants import ABOUT_GITHUB, APP_FILE_EXTENSION, APP_NAME
@@ -741,6 +742,7 @@ class AppController:
         self._apply_hotkeys()
         for editor in list(self.editors):
             editor.set_auto_crop_on_shrink(self.config.auto_crop_on_shrink)
+            editor.apply_editor_shortcuts(self.config.editor_shortcuts)
 
     def _capture_save_directory(self) -> Path:
         """
@@ -754,7 +756,7 @@ class AppController:
         if configured:
             target = Path(configured).expanduser()
         else:
-            target = Path.home() / "Pictures" / "Snappix"
+            target = Path(default_capture_save_directory())
         target.mkdir(parents=True, exist_ok=True)
         return target
 
@@ -1070,6 +1072,7 @@ class AppController:
         editor.set_theme_selection(self.config.theme)
         editor.set_export_preset(self.config.export_preset, emit_signal=False)
         editor.set_auto_crop_on_shrink(self.config.auto_crop_on_shrink)
+        editor.apply_editor_shortcuts(self.config.editor_shortcuts)
         editor.set_batch_export_profiles(
             self.config.batch_export_profiles,
             selected_key=self.config.batch_export_profile_key,

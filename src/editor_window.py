@@ -30,7 +30,6 @@ from PySide6.QtGui import (
     QFontDatabase,
     QGuiApplication,
     QIcon,
-    QKeySequence,
     QPainter,
     QPageLayout,
     QPageSize,
@@ -106,6 +105,13 @@ from src.theme import (
     normalize_theme_name,
     palette_button_stylesheet,
 )
+from src.shortcuts import (
+    build_shortcuts_reference_text,
+    format_shortcut_for_display,
+    normalize_editor_shortcuts,
+    resolved_shortcut_text,
+    sequences_for_action,
+)
 
 
 _SELECTION_TYPE_LABELS: dict[str, str] = {
@@ -125,6 +131,7 @@ _STROKE_STYLE_LABELS: dict[str, str] = {
     STROKE_STYLE_DASH_DOT: "Dash-dot",
 }
 _CANVAS_CLIPBOARD_MIME = "application/x-snappix-canvas"
+_ANNOTATIONS_CLIPBOARD_MIME = "application/x-snappix-annotations"
 
 
 def _format_rgba_color(rgba: list[Any]) -> str:
@@ -332,6 +339,8 @@ class EditorWindow(QMainWindow):
         self._text_line_spacing = 1.2
         self._text_box_padding = 10.0
         self._text_corner_radius = 6.0
+        self._shortcut_actions: dict[str, QAction] = {}
+        self._editor_shortcut_overrides: dict[str, str] = {}
 
         container = QWidget(self)
         self.setCentralWidget(container)
@@ -1110,7 +1119,7 @@ class EditorWindow(QMainWindow):
         """
 
         tooltips = {
-            Tool.SELECT: "Select and move annotations.",
+            Tool.SELECT: "Select and move annotations. Shift/Ctrl+click to multi-select.",
             Tool.RECT: "Draw one rectangle. Double-click to lock tool.",
             Tool.ELLIPSE: "Draw one ellipse. Double-click to lock tool.",
             Tool.LINE: "Draw one line. Double-click to lock tool.",
@@ -1173,7 +1182,7 @@ class EditorWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         """
-        Builds application menus and actions.
+        Builds the application menu bar and registers shortcut actions.
 
         Returns:
             None
@@ -1186,36 +1195,36 @@ class EditorWindow(QMainWindow):
         help_menu = menu.addMenu("Help")
 
         new_canvas_action = QAction("New Canvas...", self)
-        new_canvas_action.setShortcut(QKeySequence.StandardKey.New)
         new_canvas_action.setToolTip("Create a blank canvas with a custom size.")
         new_canvas_action.triggered.connect(self.new_canvas_requested.emit)
         file_menu.addAction(new_canvas_action)
+        self._register_shortcut_action("new_canvas", new_canvas_action)
 
         file_menu.addSeparator()
 
         open_action = QAction("Open Project...", self)
-        open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.setToolTip("Open an existing Snappix project.")
         open_action.triggered.connect(self.open_project)
         file_menu.addAction(open_action)
+        self._register_shortcut_action("open_project", open_action)
 
         save_as_action = QAction("Save Project As...", self)
-        save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_as_action.setToolTip("Save project under a new file name.")
         save_as_action.triggered.connect(self.save_project_as)
         file_menu.addAction(save_as_action)
+        self._register_shortcut_action("save_project_as", save_as_action)
 
         save_action = QAction("Save Project", self)
-        save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.setToolTip("Save changes to the current project.")
         save_action.triggered.connect(self.save_project)
         file_menu.addAction(save_action)
+        self._register_shortcut_action("save_project", save_action)
 
         export_action = QAction("Export...", self)
-        export_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
         export_action.setToolTip("Open export dialog for image or PDF.")
         export_action.triggered.connect(self.export_with_dialog)
         file_menu.addAction(export_action)
+        self._register_shortcut_action("export", export_action)
 
         export_png = QAction("Export as PNG...", self)
         export_png.setToolTip("Export the composited image as PNG.")
@@ -1240,42 +1249,36 @@ class EditorWindow(QMainWindow):
         file_menu.addSeparator()
 
         print_action = QAction("Print...", self)
-        print_action.setShortcut(QKeySequence.StandardKey.Print)
         print_action.setToolTip("Print the composited image.")
         print_action.triggered.connect(self.print_image)
         file_menu.addAction(print_action)
+        self._register_shortcut_action("print", print_action)
 
         file_menu.addSeparator()
 
         close_action = QAction("Close", self)
-        close_action.setShortcut(QKeySequence.StandardKey.Close)
         close_action.setToolTip("Close this editor tab.")
         close_action.triggered.connect(self.close)
         file_menu.addAction(close_action)
+        self._register_shortcut_action("close_tab", close_action)
 
         self.undo_action = QAction("Undo", self)
-        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         self.undo_action.setToolTip("Undo the last change.")
         self.undo_action.triggered.connect(self.undo)
         edit_menu.addAction(self.undo_action)
+        self._register_shortcut_action("undo", self.undo_action)
 
         self.redo_action = QAction("Redo", self)
-        self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
-        self.redo_action.setShortcuts(
-            [
-                QKeySequence.StandardKey.Redo,
-                QKeySequence("Ctrl+Shift+Z"),
-            ]
-        )
         self.redo_action.setToolTip("Redo the last undone change.")
         self.redo_action.triggered.connect(self.redo)
         edit_menu.addAction(self.redo_action)
+        self._register_shortcut_action("redo", self.redo_action)
 
         duplicate_action = QAction("Duplicate", self)
-        duplicate_action.setShortcut(QKeySequence("Ctrl+D"))
         duplicate_action.setToolTip("Duplicate the current selection.")
         duplicate_action.triggered.connect(self._duplicate_selection)
         edit_menu.addAction(duplicate_action)
+        self._register_shortcut_action("duplicate", duplicate_action)
 
         edit_menu.addSeparator()
 
@@ -1306,29 +1309,31 @@ class EditorWindow(QMainWindow):
         import_image_action.triggered.connect(self.import_image)
         edit_menu.addAction(import_image_action)
 
+        copy_image_action = QAction("Copy", self)
+        copy_image_action.setToolTip(
+            "Copy selected annotations, or the full drawing area when nothing is selected."
+        )
+        copy_image_action.triggered.connect(self.copy_current_image_to_clipboard)
+        edit_menu.addAction(copy_image_action)
+        self._register_shortcut_action("copy", copy_image_action)
+
         paste_action = QAction("Paste", self)
-        paste_action.setShortcut(QKeySequence.StandardKey.Paste)
-        paste_action.setToolTip("Paste text or image from clipboard.")
+        paste_action.setToolTip("Paste text, image, or Snappix clipboard payloads.")
         paste_action.triggered.connect(self.paste_from_clipboard)
         edit_menu.addAction(paste_action)
+        self._register_shortcut_action("paste", paste_action)
 
         copy_canvas_area_action = QAction("Copy Drawing Area", self)
-        copy_canvas_area_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
         copy_canvas_area_action.setToolTip("Copy this tab drawing area for another tab.")
         copy_canvas_area_action.triggered.connect(self.copy_drawing_area_to_clipboard)
         edit_menu.addAction(copy_canvas_area_action)
+        self._register_shortcut_action("copy_drawing_area", copy_canvas_area_action)
 
         paste_canvas_area_action = QAction("Paste Drawing Area", self)
-        paste_canvas_area_action.setShortcut(QKeySequence("Ctrl+Shift+V"))
         paste_canvas_area_action.setToolTip("Paste copied drawing area into this tab.")
         paste_canvas_area_action.triggered.connect(self.paste_drawing_area_from_clipboard)
         edit_menu.addAction(paste_canvas_area_action)
-
-        copy_image_action = QAction("Copy Image", self)
-        copy_image_action.setShortcut(QKeySequence.StandardKey.Copy)
-        copy_image_action.setToolTip("Copy current composited image to clipboard.")
-        copy_image_action.triggered.connect(self.copy_current_image_to_clipboard)
-        edit_menu.addAction(copy_image_action)
+        self._register_shortcut_action("paste_drawing_area", paste_canvas_area_action)
 
         theme_menu = view_menu.addMenu("Theme")
         self._theme_action_group = QActionGroup(self)
@@ -1352,36 +1357,37 @@ class EditorWindow(QMainWindow):
 
         view_menu.addSeparator()
         zoom_in_action = QAction("Zoom In", self)
-        zoom_in_action.setShortcuts(
-            [
-                QKeySequence.StandardKey.ZoomIn,
-                QKeySequence("Ctrl++"),
-                QKeySequence("Ctrl+="),
-            ]
-        )
         zoom_in_action.setToolTip("Zoom in on the canvas.")
         zoom_in_action.triggered.connect(self.canvas.zoom_in)
         view_menu.addAction(zoom_in_action)
+        self._register_shortcut_action("zoom_in", zoom_in_action)
 
         zoom_out_action = QAction("Zoom Out", self)
-        zoom_out_action.setShortcuts(
-            [
-                QKeySequence.StandardKey.ZoomOut,
-                QKeySequence("Ctrl+-"),
-            ]
-        )
         zoom_out_action.setToolTip("Zoom out on the canvas.")
         zoom_out_action.triggered.connect(self.canvas.zoom_out)
         view_menu.addAction(zoom_out_action)
+        self._register_shortcut_action("zoom_out", zoom_out_action)
 
         zoom_reset_action = QAction("Reset Zoom", self)
-        zoom_reset_action.setShortcut(QKeySequence("Ctrl+0"))
         zoom_reset_action.setToolTip("Reset zoom to fit the document.")
         zoom_reset_action.triggered.connect(self.canvas.reset_zoom)
         view_menu.addAction(zoom_reset_action)
+        self._register_shortcut_action("zoom_reset", zoom_reset_action)
+
+        scale_up_action = QAction("Scale Selection Up", self)
+        scale_up_action.setToolTip("Scale the current selection larger.")
+        scale_up_action.triggered.connect(lambda: self.canvas.resize_selected_items(1.1))
+        view_menu.addAction(scale_up_action)
+        self._register_shortcut_action("scale_selection_up", scale_up_action)
+
+        scale_down_action = QAction("Scale Selection Down", self)
+        scale_down_action.setToolTip("Scale the current selection smaller.")
+        scale_down_action.triggered.connect(lambda: self.canvas.resize_selected_items(0.9))
+        view_menu.addAction(scale_down_action)
+        self._register_shortcut_action("scale_selection_down", scale_down_action)
 
         settings_action = QAction("Settings...", self)
-        settings_action.setToolTip("Configure hotkeys and capture behavior.")
+        settings_action.setToolTip("Configure hotkeys, shortcuts, and capture behavior.")
         settings_action.triggered.connect(self.settings_requested.emit)
         view_menu.addAction(settings_action)
 
@@ -1390,17 +1396,51 @@ class EditorWindow(QMainWindow):
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
 
-        shortcuts_action = QAction("Shortcuts & Manual", self)
-        shortcuts_action.setToolTip("Show manual and keyboard shortcuts.")
-        shortcuts_action.triggered.connect(self.show_manual)
-        help_menu.addAction(shortcuts_action)
+        manual_action = QAction("Manual", self)
+        manual_action.setToolTip("Show a short manual and the current keyboard shortcuts.")
+        manual_action.triggered.connect(self.show_manual)
+        help_menu.addAction(manual_action)
 
-        shortcuts_reference_action = QAction("Keyboard Shortcuts", self)
-        shortcuts_reference_action.setToolTip("Show keyboard shortcut reference.")
-        shortcuts_reference_action.triggered.connect(self.show_shortcuts_reference)
-        help_menu.addAction(shortcuts_reference_action)
-
+        self.apply_editor_shortcuts({})
         self._update_undo_redo_actions()
+
+    def _register_shortcut_action(self, action_id: str, action: QAction) -> None:
+        """
+        Registers one menu action for configurable keyboard shortcuts.
+
+        Args:
+            action_id: Stable shortcut identifier.
+            action: Qt action that receives the binding.
+
+        Returns:
+            None
+        """
+
+        self._shortcut_actions[action_id] = action
+
+    def apply_editor_shortcuts(self, overrides: dict[str, str] | None) -> None:
+        """
+        Applies configured editor shortcuts to registered actions.
+
+        Args:
+            overrides: Shortcut overrides from application settings.
+
+        Returns:
+            None
+        """
+
+        self._editor_shortcut_overrides = normalize_editor_shortcuts(overrides)
+        for action_id, action in self._shortcut_actions.items():
+            sequences = sequences_for_action(action_id, self._editor_shortcut_overrides)
+            action.setShortcuts(sequences)
+            binding = format_shortcut_for_display(
+                resolved_shortcut_text(action_id, self._editor_shortcut_overrides)
+            )
+            tip = action.toolTip().split(" Shortcut:")[0].rstrip()
+            if binding != "(none)":
+                action.setToolTip(f"{tip} Shortcut: {binding}.")
+            else:
+                action.setToolTip(tip)
 
     def _set_tool(self, tool: str) -> None:
         """
@@ -3891,15 +3931,59 @@ class EditorWindow(QMainWindow):
 
     def copy_current_image_to_clipboard(self) -> None:
         """
-        Copies current composited tab image into clipboard.
+        Copies selected annotations or the full drawing area to the clipboard.
 
         Returns:
             None
         """
 
+        if self.canvas.has_selected_annotations():
+            self.copy_selected_annotations_to_clipboard()
+            return
+
         mime_data = self._build_canvas_clipboard_mime_data()
         QGuiApplication.clipboard().setMimeData(mime_data)
         self._show_drawing_area_copied_feedback()
+
+    def copy_selected_annotations_to_clipboard(self) -> bool:
+        """
+        Copies currently selected annotations for cross-tab paste.
+
+        Returns:
+            bool: True when a selection payload was copied.
+        """
+
+        annotations = self.canvas.collect_selected_annotations()
+        if not annotations:
+            return False
+
+        payload = {
+            "kind": "annotations",
+            "annotations": [annotation.to_dict() for annotation in annotations],
+        }
+        encoded = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        mime_data = QMimeData()
+        mime_data.setData(_ANNOTATIONS_CLIPBOARD_MIME, encoded)
+        # Keep canvas MIME compatibility for older paste paths when useful.
+        mime_data.setData(
+            _CANVAS_CLIPBOARD_MIME,
+            json.dumps(
+                {
+                    "kind": "annotations",
+                    "screenshot_png_base64": "",
+                    "annotations": payload["annotations"],
+                },
+                ensure_ascii=True,
+            ).encode("utf-8"),
+        )
+        QGuiApplication.clipboard().setMimeData(mime_data)
+
+        bounds = self.canvas.selected_annotations_bounds()
+        self.canvas.flash_copy_feedback(bounds)
+        count = len(annotations)
+        label = "annotation" if count == 1 else "annotations"
+        self.statusBar().showMessage(f"Copied {count} {label}", 3500)
+        return True
 
     def copy_drawing_area_to_clipboard(self) -> None:
         """
@@ -3941,6 +4025,7 @@ class EditorWindow(QMainWindow):
         """
 
         payload = {
+            "kind": "canvas",
             "screenshot_png_base64": pixmap_to_base64_png(self.canvas.screenshot()),
             "annotations": [
                 annotation.to_dict()
@@ -3961,6 +4046,59 @@ class EditorWindow(QMainWindow):
         mime_data.setImageData(composited.toImage())
         return mime_data
 
+    def paste_selected_annotations_from_clipboard(self) -> bool:
+        """
+        Pastes copied annotation selection into this tab.
+
+        Returns:
+            bool: True when a selection payload was pasted.
+        """
+
+        clipboard = QGuiApplication.clipboard()
+        mime_data = clipboard.mimeData()
+        if mime_data is None:
+            return False
+
+        annotations_data: list[Any] | None = None
+        if mime_data.hasFormat(_ANNOTATIONS_CLIPBOARD_MIME):
+            raw_data = bytes(mime_data.data(_ANNOTATIONS_CLIPBOARD_MIME))
+            try:
+                payload = json.loads(raw_data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return False
+            candidate = payload.get("annotations")
+            if isinstance(candidate, list):
+                annotations_data = candidate
+        elif mime_data.hasFormat(_CANVAS_CLIPBOARD_MIME):
+            raw_data = bytes(mime_data.data(_CANVAS_CLIPBOARD_MIME))
+            try:
+                payload = json.loads(raw_data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return False
+            if str(payload.get("kind") or "") != "annotations":
+                return False
+            candidate = payload.get("annotations")
+            if isinstance(candidate, list):
+                annotations_data = candidate
+
+        if not isinstance(annotations_data, list):
+            return False
+
+        annotations = [
+            AnnotationModel.from_dict(item)
+            for item in annotations_data
+            if isinstance(item, dict)
+        ]
+        if not annotations:
+            return False
+        if not self.canvas.merge_annotations_payload(annotations):
+            return False
+        self._refresh_layer_panel()
+        count = len(annotations)
+        label = "annotation" if count == 1 else "annotations"
+        self.statusBar().showMessage(f"Pasted {count} {label}", 2500)
+        return True
+
     def paste_drawing_area_from_clipboard(self) -> bool:
         """
         Pastes a copied drawing area from another tab into this tab.
@@ -3978,9 +4116,13 @@ class EditorWindow(QMainWindow):
             payload = json.loads(raw_data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return False
+        if str(payload.get("kind") or "canvas") == "annotations":
+            return False
         screenshot_data = payload.get("screenshot_png_base64")
         annotations_data = payload.get("annotations")
         if not isinstance(screenshot_data, str) or not isinstance(annotations_data, list):
+            return False
+        if not screenshot_data:
             return False
         annotations = [
             AnnotationModel.from_dict(item)
@@ -4001,12 +4143,14 @@ class EditorWindow(QMainWindow):
 
     def paste_from_clipboard(self) -> None:
         """
-        Pastes clipboard content, preferring Snappix drawing area payloads.
+        Pastes clipboard content, preferring Snappix selection then drawing area.
 
         Returns:
             None
         """
 
+        if self.paste_selected_annotations_from_clipboard():
+            return
         if self.paste_drawing_area_from_clipboard():
             return
         self.canvas.paste_from_clipboard()
@@ -4031,7 +4175,7 @@ class EditorWindow(QMainWindow):
 
     def show_manual(self) -> None:
         """
-        Displays quick manual and shortcut list.
+        Displays a short manual and the currently configured shortcuts.
 
         Returns:
             None
@@ -4039,71 +4183,12 @@ class EditorWindow(QMainWindow):
 
         QMessageBox.information(
             self,
-            "Manual and Shortcuts",
+            "Manual",
             "How it works:\n"
             "1) Use the capture panel to create a screenshot.\n"
             "2) Annotate with tools in the top bar.\n"
             "3) Save project, export image, or print from File menu.\n\n"
-            "Keyboard shortcuts (standard behavior):\n"
-            "Ctrl+S: Save project\n"
-            "Ctrl+Shift+E: Export dialog\n"
-            "Ctrl+P: Print dialog\n"
-            "Ctrl+Shift+S: Save project as\n"
-            "Ctrl+O: Open project\n"
-            "Ctrl+Z: Undo\n"
-            "Ctrl+Y / Ctrl+Shift+Z: Redo\n"
-            "Ctrl+C: Copy drawing area and composited image\n"
-            "Ctrl+Shift+C: Copy drawing area (for another tab)\n"
-            "Ctrl+V: Paste text/image/image file/image URL\n"
-            "Ctrl+Shift+V: Paste drawing area from another tab\n"
-            "Ctrl++ / Ctrl+=: Zoom in\n"
-            "Ctrl+-: Zoom out\n"
-            "Ctrl+0: Reset zoom\n"
-            "Shift+Mouse Wheel: Zoom on canvas\n"
-            "Mouse Wheel / side wheel: Scroll canvas\n"
-            "Ctrl+Shift++ / Ctrl+Shift+-: Scale selection\n"
-            "Arrow keys: Nudge selected layer by 1 px\n"
-            "Shift+Arrow keys: Nudge selected layer by 10 px\n"
-            "Enter: Apply crop selection\n"
-            "Esc: Cancel crop selection or capture overlays\n\n"
-            "Project shortcuts:\n"
-            "Ctrl+O: Open project\n"
-            "Use File > Save Project to update current .sfp file.",
-        )
-
-    def show_shortcuts_reference(self) -> None:
-        """
-        Displays a dedicated keyboard shortcut reference.
-
-        Returns:
-            None
-        """
-
-        QMessageBox.information(
-            self,
-            "Keyboard Shortcuts",
-            "Editor shortcuts:\n"
-            "Ctrl+S  - Save project (.sfp)\n"
-            "Ctrl+Shift+E  - Open export dialog (PNG/JPG/PDF)\n"
-            "Ctrl+P  - Open print dialog\n"
-            "Ctrl+Shift+S  - Save project as (.sfp)\n"
-            "Ctrl+O  - Open project\n"
-            "Ctrl+Z  - Undo\n"
-            "Ctrl+Y / Ctrl+Shift+Z  - Redo\n"
-            "Ctrl+C  - Copy drawing area and composited image\n"
-            "Ctrl+Shift+C  - Copy drawing area (cross-tab)\n"
-            "Ctrl+V  - Paste text/image/image file/image URL\n"
-            "Ctrl+Shift+V  - Paste drawing area (cross-tab)\n"
-            "Ctrl++ / Ctrl+=  - Zoom in\n"
-            "Ctrl+-  - Zoom out\n"
-            "Ctrl+0  - Reset zoom\n"
-            "Shift+Mouse Wheel  - Zoom on canvas\n"
-            "Mouse Wheel / side wheel  - Scroll canvas\n"
-            "Ctrl+Shift++ / Ctrl+Shift+-  - Scale selection\n"
-            "Arrow keys  - Nudge selection by 1 px\n"
-            "Shift+Arrow keys  - Nudge selection by 10 px\n"
-            "Enter  - Apply crop\n"
-            "Esc  - Cancel crop or capture overlay\n",
+            + build_shortcuts_reference_text(self._editor_shortcut_overrides),
         )
 
     def _update_window_title(self) -> None:

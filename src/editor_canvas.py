@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,8 @@ _DOCUMENT_MATTE_COLOR = "#ffffff"
 _CLIPBOARD_IMAGE_SUFFIXES = frozenset(
     {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 )
+_CANVAS_CLIPBOARD_MIME = "application/x-snappix-canvas"
+_ANNOTATIONS_CLIPBOARD_MIME = "application/x-snappix-annotations"
 
 
 def decode_base64_to_pixmap(value: str) -> QPixmap:
@@ -1022,7 +1025,7 @@ class EditorCanvas(QGraphicsView):
             super().mousePressEvent(event)
             return
 
-        if self._try_select_item_with_ctrl(event):
+        if self._try_toggle_item_selection(event):
             return
 
         scene_pos = self.mapToScene(event.position().toPoint())
@@ -1121,9 +1124,9 @@ class EditorCanvas(QGraphicsView):
 
         super().mousePressEvent(event)
 
-    def _try_select_item_with_ctrl(self, event: QMouseEvent) -> bool:
+    def _try_toggle_item_selection(self, event: QMouseEvent) -> bool:
         """
-        Selects an item on Ctrl+click while preserving the current tool.
+        Toggles annotation multi-selection with Ctrl+click or Shift+click.
 
         Args:
             event: Mouse press event.
@@ -1134,20 +1137,23 @@ class EditorCanvas(QGraphicsView):
 
         if event.button() != Qt.MouseButton.LeftButton:
             return False
-        if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+        modifiers = event.modifiers()
+        if not (
+            modifiers & Qt.KeyboardModifier.ControlModifier
+            or modifiers & Qt.KeyboardModifier.ShiftModifier
+        ):
             return False
 
-        hit_item = self.itemAt(event.position().toPoint())
+        hit_item = self._annotation_item_at_view_pos(event.position().toPoint())
         if hit_item is None:
-            return False
-        if hit_item in self._non_annotation_scene_items():
             return False
         if not (hit_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable):
             return False
 
-        self._scene.clearSelection()
-        hit_item.setSelected(True)
-        self._scene.setFocusItem(hit_item)
+        hit_item.setSelected(not hit_item.isSelected())
+        if hit_item.isSelected():
+            self._scene.setFocusItem(hit_item)
+        self.viewport().update()
         event.accept()
         return True
 
@@ -1724,6 +1730,48 @@ class EditorCanvas(QGraphicsView):
         models.reverse()
         return models
 
+    def collect_selected_annotations(self) -> list[AnnotationModel]:
+        """
+        Serializes currently selected annotation items.
+
+        Returns:
+            list[AnnotationModel]: Selected annotations in scene order.
+        """
+
+        models: list[AnnotationModel] = []
+        for item in self._selected_annotation_items():
+            annotation = annotation_from_item(item)
+            if annotation is not None:
+                models.append(annotation)
+        return models
+
+    def has_selected_annotations(self) -> bool:
+        """
+        Indicates whether at least one annotation is selected.
+
+        Returns:
+            bool: True when a drawable selection exists.
+        """
+
+        return bool(self._selected_annotation_items())
+
+    def selected_annotations_bounds(self) -> QRectF:
+        """
+        Returns the union bounds of currently selected annotations.
+
+        Returns:
+            QRectF: Scene-space bounding rectangle, empty when nothing selected.
+        """
+
+        bounds = QRectF()
+        for item in self._selected_annotation_items():
+            item_rect = self._item_scene_rect(item)
+            if bounds.isNull():
+                bounds = item_rect
+            else:
+                bounds = bounds.united(item_rect)
+        return bounds
+
     def load_annotations(self, models: list[AnnotationModel]) -> None:
         """
         Clears and rebuilds annotation items from models.
@@ -1767,16 +1815,20 @@ class EditorCanvas(QGraphicsView):
             self._copy_feedback_item.setVisible(copy_feedback_was_visible)
         return QPixmap.fromImage(image)
 
-    def flash_copy_feedback(self) -> None:
+    def flash_copy_feedback(self, target_rect: QRectF | None = None) -> None:
         """
-        Shows a temporary dashed frame around the copied drawing area.
+        Shows a temporary dashed frame around the copied region.
+
+        Args:
+            target_rect: Optional scene rectangle to highlight. Uses the full
+                document frame when omitted.
 
         Returns:
             None
         """
 
-        document_rect = self.document_rect()
-        if document_rect.width() < 1.0 or document_rect.height() < 1.0:
+        document_rect = target_rect if target_rect is not None else self.document_rect()
+        if document_rect.isNull() or document_rect.width() < 1.0 or document_rect.height() < 1.0:
             return
 
         self.clear_copy_feedback()
@@ -1847,7 +1899,7 @@ class EditorCanvas(QGraphicsView):
 
     def paste_from_clipboard(self, view_pos: QPoint | None = None) -> None:
         """
-        Pastes text, image, image file, or image URL from clipboard.
+        Pastes Snappix payloads, text, image, image file, or image URL.
 
         Args:
             view_pos: Optional view coordinate for insertion.
@@ -1858,6 +1910,9 @@ class EditorCanvas(QGraphicsView):
 
         clipboard = QGuiApplication.clipboard()
         mime = clipboard.mimeData()
+        if self._try_paste_snappix_clipboard(mime):
+            return
+
         scene_pos = (
             self.mapToScene(view_pos) if view_pos is not None else self.mapToScene(self.viewport().rect().center())
         )
@@ -1894,9 +1949,66 @@ class EditorCanvas(QGraphicsView):
                 configure_graphics_item(text_item, "text")
                 self._emit_content_changed("Paste text")
 
+    def _try_paste_snappix_clipboard(self, mime) -> bool:
+        """
+        Pastes Snappix annotation or drawing-area clipboard payloads.
+
+        Args:
+            mime: Clipboard MIME data.
+
+        Returns:
+            bool: True when a Snappix payload was pasted.
+        """
+
+        if mime is None:
+            return False
+
+        if mime.hasFormat(_ANNOTATIONS_CLIPBOARD_MIME):
+            raw_data = bytes(mime.data(_ANNOTATIONS_CLIPBOARD_MIME))
+            try:
+                payload = json.loads(raw_data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return False
+            annotations_data = payload.get("annotations")
+            if isinstance(annotations_data, list):
+                annotations = [
+                    AnnotationModel.from_dict(item)
+                    for item in annotations_data
+                    if isinstance(item, dict)
+                ]
+                if annotations and self.merge_annotations_payload(annotations):
+                    return True
+
+        if mime.hasFormat(_CANVAS_CLIPBOARD_MIME):
+            raw_data = bytes(mime.data(_CANVAS_CLIPBOARD_MIME))
+            try:
+                payload = json.loads(raw_data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return False
+            annotations_data = payload.get("annotations")
+            if not isinstance(annotations_data, list):
+                return False
+            annotations = [
+                AnnotationModel.from_dict(item)
+                for item in annotations_data
+                if isinstance(item, dict)
+            ]
+            if str(payload.get("kind") or "") == "annotations":
+                return bool(annotations) and self.merge_annotations_payload(annotations)
+
+            screenshot_data = payload.get("screenshot_png_base64")
+            if not isinstance(screenshot_data, str) or not screenshot_data:
+                return False
+            source_screenshot = decode_base64_to_pixmap(screenshot_data)
+            if source_screenshot.isNull():
+                return False
+            return self.merge_canvas_payload(source_screenshot, annotations)
+
+        return False
+
     def keyPressEvent(self, event) -> None:
         """
-        Handles Ctrl+V clipboard paste shortcut.
+        Handles canvas-local keys that are not covered by menu actions.
 
         Args:
             event: Key event.
@@ -1905,50 +2017,6 @@ class EditorCanvas(QGraphicsView):
             None
         """
 
-        if (
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
-            and event.key() == Qt.Key.Key_D
-        ):
-            if self.duplicate_selected_items():
-                return
-        if event.matches(QKeySequence.StandardKey.Paste):
-            self.paste_from_clipboard()
-            return
-        if (
-            event.modifiers()
-            == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
-            and event.key() in {Qt.Key.Key_Plus, Qt.Key.Key_Equal}
-        ):
-            if self.resize_selected_items(1.1):
-                return
-        if (
-            event.modifiers()
-            == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
-            and event.key() in {Qt.Key.Key_Minus, Qt.Key.Key_Underscore}
-        ):
-            if self.resize_selected_items(0.9):
-                return
-        if (
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
-            and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            and event.key() in {Qt.Key.Key_Plus, Qt.Key.Key_Equal}
-        ):
-            self.zoom_in()
-            return
-        if (
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
-            and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            and event.key() in {Qt.Key.Key_Minus, Qt.Key.Key_Underscore}
-        ):
-            self.zoom_out()
-            return
-        if (
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
-            and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            and event.key() == Qt.Key.Key_0
-        ):
-            self.reset_zoom()
-            return
         if event.modifiers() in {
             Qt.KeyboardModifier.NoModifier,
             Qt.KeyboardModifier.ShiftModifier,
@@ -2837,6 +2905,80 @@ class EditorCanvas(QGraphicsView):
         self._emit_content_changed("Paste drawing area")
         return True
 
+    def merge_annotations_payload(self, source_annotations: list[AnnotationModel]) -> bool:
+        """
+        Pastes selected annotations into the current tab near the viewport center.
+
+        Args:
+            source_annotations: Annotations copied from another tab or selection.
+
+        Returns:
+            bool: True when at least one annotation was pasted.
+        """
+
+        if not source_annotations:
+            return False
+
+        source_bounds = QRectF()
+        for annotation in source_annotations:
+            item_rect = QRectF(
+                float(annotation.x),
+                float(annotation.y),
+                max(1.0, float(annotation.width)),
+                max(1.0, float(annotation.height)),
+            )
+            if source_bounds.isNull():
+                source_bounds = item_rect
+            else:
+                source_bounds = source_bounds.united(item_rect)
+
+        center_scene = self.mapToScene(self.viewport().rect().center())
+        desired_top_left = QPointF(
+            center_scene.x() - (source_bounds.width() / 2.0),
+            center_scene.y() - (source_bounds.height() / 2.0),
+        )
+        snapped_top_left = self._snap_point_to_grid(desired_top_left)
+        offset = snapped_top_left - source_bounds.topLeft()
+
+        max_z = max(
+            (item.zValue() for item in self._annotation_items()),
+            default=0.0,
+        )
+        created_items: list[QGraphicsItem] = []
+        for index, annotation in enumerate(source_annotations, start=1):
+            merged_annotation = AnnotationModel(
+                annotation_type=annotation.annotation_type,
+                x=float(annotation.x + offset.x()),
+                y=float(annotation.y + offset.y()),
+                width=float(annotation.width),
+                height=float(annotation.height),
+                stroke_rgba=list(annotation.stroke_rgba),
+                fill_rgba=list(annotation.fill_rgba),
+                stroke_width=float(annotation.stroke_width),
+                text=str(annotation.text),
+                font_size=int(annotation.font_size),
+                font_family=str(annotation.font_family),
+                font_bold=bool(annotation.font_bold),
+                font_italic=bool(annotation.font_italic),
+                font_underline=bool(annotation.font_underline),
+                payload=copy.deepcopy(annotation.payload),
+            )
+            merged_annotation.payload["z_index"] = max_z + float(index)
+            merged_item = add_annotation_to_scene(self._scene, merged_annotation)
+            if merged_item is not None:
+                created_items.append(merged_item)
+
+        if not created_items:
+            return False
+
+        self._scene.clearSelection()
+        for item in created_items:
+            item.setSelected(True)
+        self._sync_resize_overlay_with_target()
+        self.viewport().update()
+        self._emit_content_changed("Paste selection")
+        return True
+
     def _on_selection_changed(self) -> None:
         """
         Emits style details of the first selected item.
@@ -2851,6 +2993,7 @@ class EditorCanvas(QGraphicsView):
             self._alignment_guides.clear()
             self._alignment_labels.clear()
             self.selection_style_changed.emit({"type": ""})
+            self.viewport().update()
             return
         item = selected[0]
         if item in {self._crop_item, self._crop_shade_item, self._resize_overlay_item}:
@@ -2858,12 +3001,14 @@ class EditorCanvas(QGraphicsView):
             self._alignment_guides.clear()
             self._alignment_labels.clear()
             self.selection_style_changed.emit({"type": ""})
+            self.viewport().update()
             return
         if len(selected) == 1 and self._can_resize_item(item):
             self._sync_resize_overlay_with_target(item)
         else:
             self._clear_resize_overlay()
         self._refresh_selection_info()
+        self.viewport().update()
 
     def _can_resize_item(self, item: QGraphicsItem) -> bool:
         """
@@ -3520,6 +3665,26 @@ class EditorCanvas(QGraphicsView):
             painter.setFont(label_font)
             for text, position in self._alignment_labels:
                 painter.drawText(position, text)
+
+        selected_items = self._selected_annotation_items()
+        if selected_items:
+            accent_hex, _ = get_editor_accent_colors()
+            accent = QColor(accent_hex)
+            selection_pen = QPen(accent, 2.0, Qt.PenStyle.DashLine)
+            selection_pen.setCosmetic(True)
+            selection_pen.setDashPattern([6.0, 4.0])
+            painter.setPen(selection_pen)
+            fill = QColor(accent)
+            fill.setAlpha(36)
+            painter.setBrush(fill)
+            for item in selected_items:
+                if (
+                    len(selected_items) == 1
+                    and self._resize_overlay_target is item
+                ):
+                    continue
+                frame = self._item_scene_rect(item).adjusted(-2.0, -2.0, 2.0, 2.0)
+                painter.drawRect(frame)
 
     def _ensure_crop_shade_item(self) -> None:
         """

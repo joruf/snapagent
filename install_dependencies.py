@@ -13,10 +13,43 @@ from pathlib import Path
 from shutil import which
 
 SYSTEM_PACKAGE_MAP: dict[str, list[str]] = {
-    "apt-get": ["libxcb-cursor0", "xdotool", "x11-utils", "tesseract-ocr"],
-    "dnf": ["xcb-util-cursor", "xdotool", "xwininfo", "tesseract"],
-    "pacman": ["xcb-util-cursor", "xdotool", "xorg-xwininfo", "tesseract"],
-    "zypper": ["libxcb-cursor0", "xdotool", "xwininfo", "tesseract-ocr"],
+    "apt-get": [
+        "libxcb-cursor0",
+        "python3-tk",
+        "python3-venv",
+        "xdotool",
+        "x11-utils",
+        "tesseract-ocr",
+        "grim",
+        "slurp",
+    ],
+    "dnf": [
+        "xcb-util-cursor",
+        "python3-tkinter",
+        "xdotool",
+        "xwininfo",
+        "tesseract",
+        "grim",
+        "slurp",
+    ],
+    "pacman": [
+        "xcb-util-cursor",
+        "tk",
+        "xdotool",
+        "xorg-xwininfo",
+        "tesseract",
+        "grim",
+        "slurp",
+    ],
+    "zypper": [
+        "libxcb-cursor0",
+        "python3-tk",
+        "xdotool",
+        "xwininfo",
+        "tesseract-ocr",
+        "grim",
+        "slurp",
+    ],
 }
 
 
@@ -38,7 +71,7 @@ def run_command(command: list[str], cwd: Path) -> int:
 
 def detect_missing_system_dependencies() -> list[str]:
     """
-    Detects missing Qt/X11 and OCR runtime dependencies.
+    Detects missing required Qt/X11, OCR, and installer runtime dependencies.
 
     Returns:
         list[str]: Missing dependency keys.
@@ -53,6 +86,26 @@ def detect_missing_system_dependencies() -> list[str]:
         missing.append("xwininfo")
     if which("tesseract") is None:
         missing.append("tesseract")
+    try:
+        import tkinter  # noqa: F401
+    except ModuleNotFoundError:
+        missing.append("tkinter")
+    return missing
+
+
+def detect_missing_recommended_dependencies() -> list[str]:
+    """
+    Detects missing recommended Wayland capture tools.
+
+    Returns:
+        list[str]: Missing recommended dependency keys.
+    """
+
+    missing: list[str] = []
+    if which("grim") is None:
+        missing.append("grim")
+    if which("slurp") is None:
+        missing.append("slurp")
     return missing
 
 
@@ -100,7 +153,8 @@ def install_system_dependencies(project_dir: Path) -> int:
     """
 
     missing = detect_missing_system_dependencies()
-    if not missing:
+    recommended_missing = detect_missing_recommended_dependencies()
+    if not missing and not recommended_missing:
         return 0
 
     package_manager = detect_package_manager()
@@ -123,7 +177,10 @@ def install_system_dependencies(project_dir: Path) -> int:
 
     if package_manager is None:
         print("Snappix installer warning: no supported package manager found.")
-        print("Please install xcb cursor runtime manually for your distro.")
+        print(
+            "Please install manually: xcb-cursor, xdotool, xwininfo, tesseract, "
+            "grim, slurp, and python3-tk/tkinter."
+        )
         return 0
 
     packages = SYSTEM_PACKAGE_MAP[package_manager]
@@ -157,6 +214,13 @@ def install_system_dependencies(project_dir: Path) -> int:
     if detect_missing_system_dependencies():
         print("Snappix installer error: system dependency installation did not resolve all libraries.")
         return 1
+    still_recommended = detect_missing_recommended_dependencies()
+    if still_recommended:
+        print(
+            "Snappix installer warning: recommended tools still missing: "
+            + ", ".join(still_recommended)
+            + ". Wayland region capture may be limited."
+        )
     return 0
 
 

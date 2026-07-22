@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from src.theme import DEFAULT_THEME, normalize_theme_name
+from src.shortcuts import normalize_editor_shortcuts
 
 POST_CAPTURE_EDITOR = "editor"
 POST_CAPTURE_CLIPBOARD = "clipboard"
@@ -84,6 +85,42 @@ DEFAULT_BATCH_EXPORT_PROFILE_KEY = "docs_hq"
 DEFAULT_HOTKEY_CAPTURE_REGION = "ctrl+shift+a"
 DEFAULT_HOTKEY_CAPTURE_WINDOW = "ctrl+shift+w"
 DEFAULT_HOTKEY_CAPTURE_FULLSCREEN = "ctrl+shift+f"
+
+
+def default_capture_save_directory() -> str:
+    """
+    Returns the default capture save folder path.
+
+    Returns:
+        str: Absolute path under the user Downloads directory.
+    """
+
+    return str(Path.home() / "Downloads" / "snappix")
+
+
+def sanitize_editor_shortcut_map(
+    overrides: dict[str, str] | list[Any] | None,
+) -> dict[str, str]:
+    """
+    Sanitizes a raw editor shortcut override map from configuration.
+
+    Args:
+        overrides: Raw mapping of action id to shortcut text.
+
+    Returns:
+        dict[str, str]: Trimmed string map. Unknown ids are kept here and
+        filtered when shortcuts are applied.
+    """
+
+    if not isinstance(overrides, dict):
+        return {}
+    sanitized: dict[str, str] = {}
+    for raw_key, raw_value in overrides.items():
+        action_id = str(raw_key).strip()
+        if not action_id:
+            continue
+        sanitized[action_id] = str(raw_value).strip()
+    return sanitized
 
 
 def normalize_hotkey_spec(spec: str) -> str:
@@ -223,6 +260,7 @@ class AppConfig:
         batch_export_profile_key: Active batch export profile key.
         batch_export_last_directory: Last used batch export output directory.
         auto_crop_on_shrink: Whether unused canvas margins are cropped automatically.
+        editor_shortcuts: Optional overrides for editor keyboard shortcuts.
     """
 
     autostart_enabled: bool = False
@@ -239,6 +277,7 @@ class AppConfig:
     batch_export_profile_key: str = DEFAULT_BATCH_EXPORT_PROFILE_KEY
     batch_export_last_directory: str = ""
     auto_crop_on_shrink: bool = True
+    editor_shortcuts: dict[str, str] = None
 
     def __post_init__(self) -> None:
         """
@@ -252,6 +291,12 @@ class AppConfig:
             self.batch_export_profiles = [
                 dict(profile) for profile in DEFAULT_BATCH_EXPORT_PROFILES
             ]
+        if self.editor_shortcuts is None:
+            self.editor_shortcuts = {}
+        else:
+            self.editor_shortcuts = normalize_editor_shortcuts(
+                sanitize_editor_shortcut_map(self.editor_shortcuts)
+            )
         profile_keys = {
             str(profile.get("key", "")).strip().lower()
             for profile in self.batch_export_profiles
@@ -336,6 +381,13 @@ class ConfigManager:
                 payload.get("batch_export_last_directory", "")
             ).strip(),
             auto_crop_on_shrink=bool(payload.get("auto_crop_on_shrink", True)),
+            editor_shortcuts=normalize_editor_shortcuts(
+                sanitize_editor_shortcut_map(
+                    payload.get("editor_shortcuts")
+                    if isinstance(payload.get("editor_shortcuts"), dict)
+                    else None
+                )
+            ),
         )
 
     def save(self, config: AppConfig) -> None:
@@ -371,6 +423,9 @@ class ConfigManager:
             "batch_export_profile_key": str(config.batch_export_profile_key).strip().lower(),
             "batch_export_last_directory": config.batch_export_last_directory.strip(),
             "auto_crop_on_shrink": bool(config.auto_crop_on_shrink),
+            "editor_shortcuts": normalize_editor_shortcuts(
+                sanitize_editor_shortcut_map(config.editor_shortcuts)
+            ),
         }
         self.config_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=True),

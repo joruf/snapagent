@@ -38,7 +38,7 @@ def map_installer_line_to_status(line: str) -> str | None:
     if "creating virtual environment" in lowered:
         return "Creating Python virtual environment..."
     if "installing dependencies" in lowered:
-        return "Installing Python packages (PySide6, Pillow, requests)..."
+        return "Installing Python packages (PySide6, Pillow, requests, pynput)..."
     if "done." in lowered:
         return "Installation complete. Starting Snappix..."
     if "error" in lowered or "warning" in lowered:

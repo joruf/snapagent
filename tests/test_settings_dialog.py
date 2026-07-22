@@ -58,8 +58,13 @@ class TestSettingsDialog(unittest.TestCase):
         dialog.editor_last_tab_combo.setCurrentIndex(
             dialog.editor_last_tab_combo.findData(EDITOR_LAST_TAB_CLOSE_WINDOW)
         )
+        from PySide6.QtGui import QKeySequence
+
         dialog.save_directory_edit.setText("  /home/user/Pictures  ")
         dialog.auto_crop_on_shrink_checkbox.setChecked(False)
+        dialog._shortcut_edits["copy"].setKeySequence(  # pylint: disable=protected-access
+            QKeySequence("F7")
+        )
 
         config = dialog.build_config()
         self.assertTrue(config.hotkeys_enabled)
@@ -70,6 +75,7 @@ class TestSettingsDialog(unittest.TestCase):
         self.assertEqual(config.capture_save_directory, "/home/user/Pictures")
         self.assertEqual(config.editor_last_tab_behavior, EDITOR_LAST_TAB_CLOSE_WINDOW)
         self.assertFalse(config.auto_crop_on_shrink)
+        self.assertEqual(config.editor_shortcuts.get("copy"), "F7")
 
     def test_build_config_preserves_autostart_and_theme(self) -> None:
         """

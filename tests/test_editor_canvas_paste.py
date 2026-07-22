@@ -52,6 +52,16 @@ class TestEditorCanvasPaste(unittest.TestCase):
 
         cls._app = ensure_qapp()
 
+    def setUp(self) -> None:
+        """
+        Clears leftover Snappix clipboard payloads between tests.
+        """
+
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import QMimeData
+
+        QGuiApplication.clipboard().setMimeData(QMimeData())
+
     def test_paste_image_selects_item_with_resize_support(self) -> None:
         """
         Ensures pasted images become selected movable annotations.

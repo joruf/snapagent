@@ -74,6 +74,28 @@ class TestConfigManager(unittest.TestCase):
             self.assertEqual(config.batch_export_last_directory, "")
             self.assertTrue(config.auto_crop_on_shrink)
 
+    def test_save_and_load_editor_shortcuts_roundtrip(self) -> None:
+        """
+        Ensures custom editor shortcuts persist and unknown ids are dropped.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            manager = ConfigManager(config_path)
+            manager.save(
+                AppConfig(
+                    editor_shortcuts={
+                        "copy": "F9",
+                        "paste": "",
+                        "not_a_real_action": "F1",
+                    }
+                )
+            )
+            loaded = manager.load()
+            self.assertEqual(loaded.editor_shortcuts.get("copy"), "F9")
+            self.assertEqual(loaded.editor_shortcuts.get("paste"), "")
+            self.assertNotIn("not_a_real_action", loaded.editor_shortcuts)
+
     def test_save_and_load_roundtrip(self) -> None:
         """
         Ensures saved configuration can be loaded again.

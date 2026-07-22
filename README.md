@@ -121,20 +121,19 @@ Regenerate screenshots after UI changes:
 - Linux desktop session
 - Python packages (installed automatically into `.venv`):
   - PySide6, Pillow, requests, pynput
+- System packages (installed automatically by the first-run installer when possible):
+  - `libxcb-cursor` / `libxcb-cursor0` (Qt cursor support)
+  - `python3-tk` / `python3-tkinter` (first-run installer UI)
+  - `python3-venv` (Debian/Ubuntu virtualenv creation)
+  - `xdotool`, `xwininfo` (window/scroll capture on X11)
+  - `tesseract-ocr` (OCR tool)
+  - `grim`, `slurp` (recommended for Wayland region/fullscreen capture)
 
-### X11 capture (window capture)
-
-- `xdotool`
-- `xwininfo`
-
-### Optional (recommended)
+### Manual fallback (if automatic install is blocked)
 
 ```bash
-# Wayland region capture
-sudo apt install grim slurp
-
-# OCR text extraction in editor
-sudo apt install tesseract-ocr
+# Debian/Ubuntu
+sudo apt install libxcb-cursor0 python3-tk python3-venv xdotool x11-utils tesseract-ocr grim slurp
 ```
 
 ## Install and Run
@@ -184,7 +183,7 @@ Open via **View → Settings** (editor) or tray **Settings**:
 
 - Enable/configure global hotkeys
 - Choose action after capture (editor / clipboard / save)
-- Set capture save folder (default: `~/Pictures/Snappix/`)
+- Set capture save folder (default: `~/Downloads/snappix/`)
 
 ## CLI
 

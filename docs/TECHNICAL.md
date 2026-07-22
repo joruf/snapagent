@@ -112,7 +112,7 @@ Configured in `~/.config/snappix/config.json`:
 | `clipboard` | Copy pixmap to clipboard |
 | `save` | Save PNG to configured or default folder |
 
-Default save folder: `~/Pictures/Snappix/`
+Default save folder: `~/Downloads/snappix/`
 
 ## Editor Architecture
 
