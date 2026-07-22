@@ -2615,7 +2615,7 @@ class EditorWindow(QMainWindow):
             f"Author: {ABOUT_AUTHOR}\n"
             f"Website: {ABOUT_WEBSITE}\n"
             f"GitHub: {ABOUT_GITHUB}\n\n"
-            "A Linux screenshot editor inspired by SnagIt.",
+            "Capture screenshots, annotate visuals, blur sensitive data, run OCR, and export fast.",
         )
 
     def show_manual(self) -> None:

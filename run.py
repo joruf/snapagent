@@ -1591,7 +1591,7 @@ class AppController:
             f"About {APP_NAME}",
             (
                 f"{APP_NAME}\n"
-                "Screenshot and annotation tool inspired by SnagIt.\n\n"
+                "Capture screenshots, annotate visuals, blur sensitive data, run OCR, and export fast.\n\n"
                 "Joachim Ruf\n"
                 "Loresoft\n"
                 "https://www.loresoft.de\n"
