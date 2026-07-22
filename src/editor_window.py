@@ -37,6 +37,7 @@ from PySide6.QtGui import (
     QPolygonF,
     QPdfWriter,
     QPixmap,
+    QTextCursor,
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
@@ -55,7 +56,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressDialog,
     QPushButton,
     QSizePolicy,
@@ -417,7 +420,8 @@ class EditorWindow(QMainWindow):
         strip.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         strip_layout = QHBoxLayout(strip)
         strip_layout.setContentsMargins(2, 0, 2, 0)
-        strip_layout.setSpacing(3)
+        # Keep tools readable: base gap plus extra room for menu-arrow buttons.
+        strip_layout.setSpacing(6)
         strip_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         self._tool_buttons: dict[str, QToolButton] = {}
@@ -459,6 +463,7 @@ class EditorWindow(QMainWindow):
             self._tool_button_to_key[button] = tool_key
             strip_layout.addWidget(button)
         self._tool_buttons[Tool.SELECT].setChecked(True)
+        self._setup_pixel_tool_option_menus()
 
         strip_layout.addSpacing(4)
         self.tools_help_button = QToolButton()
@@ -609,12 +614,21 @@ class EditorWindow(QMainWindow):
         self._configure_compact_toolbar_height(self.apply_crop_button)
         style_layout.addWidget(self.apply_crop_button)
         style_layout.addWidget(self._create_toolbar_label("Width"))
-        self.stroke_size_spin = QSpinBox()
-        self.stroke_size_spin.setRange(1, 64)
-        self.stroke_size_spin.setValue(3)
-        self.stroke_size_spin.valueChanged.connect(self._stroke_width_changed)
-        self._configure_compact_toolbar_height(self.stroke_size_spin)
-        style_layout.addWidget(self.stroke_size_spin)
+        self.stroke_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.stroke_size_slider.setRange(1, 64)
+        self.stroke_size_slider.setValue(3)
+        self.stroke_size_slider.setFixedWidth(72)
+        self.stroke_size_slider.setToolTip(
+            "Stroke / brush thickness in pixels (also used by Rectangle, Line, and Brush)."
+        )
+        self.stroke_size_slider.valueChanged.connect(self._stroke_width_changed)
+        self._configure_compact_toolbar_height(self.stroke_size_slider, 22)
+        style_layout.addWidget(self.stroke_size_slider)
+        self.stroke_size_label = QLabel("3")
+        self.stroke_size_label.setMinimumWidth(22)
+        self.stroke_size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._configure_compact_toolbar_height(self.stroke_size_label, 22)
+        style_layout.addWidget(self.stroke_size_label)
         style_layout.addWidget(self._create_toolbar_label("Line"))
         self.stroke_style_combo = QComboBox()
         self.stroke_style_combo.addItem("Solid", STROKE_STYLE_SOLID)
@@ -639,25 +653,6 @@ class EditorWindow(QMainWindow):
         self.wand_tolerance_spin.valueChanged.connect(self._wand_tolerance_changed)
         self._configure_compact_toolbar_height(self.wand_tolerance_spin)
         style_layout.addWidget(self.wand_tolerance_spin)
-        self.wand_contiguous_button = QToolButton()
-        self.wand_contiguous_button.setText("Contiguous")
-        self.wand_contiguous_button.setCheckable(True)
-        self.wand_contiguous_button.setChecked(self.canvas.wand_contiguous())
-        self.wand_contiguous_button.setToolTip(
-            "When checked, Magic Wand selects only connected matching pixels."
-        )
-        self.wand_contiguous_button.toggled.connect(self._wand_contiguous_changed)
-        self._configure_compact_toolbar_height(self.wand_contiguous_button)
-        style_layout.addWidget(self.wand_contiguous_button)
-        self.erase_mode_combo = QComboBox()
-        self.erase_mode_combo.addItem("Erase: Transparent", ERASE_MODE_TRANSPARENT)
-        self.erase_mode_combo.addItem("Erase: Fill color", ERASE_MODE_FILL)
-        self.erase_mode_combo.setToolTip(
-            "Delete key clears the pixel selection to transparent or fill color."
-        )
-        self.erase_mode_combo.currentIndexChanged.connect(self._erase_mode_changed)
-        self._configure_compact_toolbar_height(self.erase_mode_combo)
-        style_layout.addWidget(self.erase_mode_combo)
         style_layout.addStretch(1)
         self._property_tabs.addTab(style_tab, "Style")
 
@@ -1249,21 +1244,13 @@ class EditorWindow(QMainWindow):
             button.setToolTip(self._tool_tooltip_text(tool_key))
 
         self.apply_crop_button.setToolTip("Apply current crop selection.")
-        self.stroke_size_spin.setToolTip(
+        self.stroke_size_slider.setToolTip(
             "Stroke / brush thickness in pixels (also used by Rectangle, Line, and Brush)."
         )
         self.stroke_style_combo.setToolTip("Select line style for lines and arrows.")
         self.blur_block_spin.setToolTip("Set blur pixel block size for redaction.")
         self.wand_tolerance_spin.setToolTip(
             "Magic Wand color tolerance (0–255). Higher values select a wider color range."
-        )
-        self.wand_contiguous_button.setToolTip(
-            "When checked, the Magic Wand selects only connected matching pixels. "
-            "When unchecked, all matching colors in the image are selected."
-        )
-        self.erase_mode_combo.setToolTip(
-            "Delete key erase mode for pixel selections: "
-            "transparent (checkerboard) or current fill color."
         )
         self.text_style_combo.setToolTip("Select plain text, text box, or speech bubble.")
         self.stroke_button.setToolTip("Open border color picker.")
@@ -1533,13 +1520,6 @@ class EditorWindow(QMainWindow):
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
 
-        tools_reference_action = QAction("Tools...", self)
-        tools_reference_action.setToolTip(
-            "Show a table of toolbar icons and what each tool does."
-        )
-        tools_reference_action.triggered.connect(self.show_tools_reference)
-        help_menu.addAction(tools_reference_action)
-
         manual_action = QAction("Manual", self)
         manual_action.setToolTip("Show a short manual and the current keyboard shortcuts.")
         manual_action.triggered.connect(self.show_manual)
@@ -1600,6 +1580,87 @@ class EditorWindow(QMainWindow):
                 action.setToolTip(f"{tip} Shortcut: {binding}.")
             else:
                 action.setToolTip(tip)
+
+    def _setup_pixel_tool_option_menus(self) -> None:
+        """
+        Attaches popup menus for Contiguous and Delete erase mode to pixel tools.
+
+        Returns:
+            None
+        """
+
+        self.wand_contiguous_action = QAction("Contiguous", self)
+        self.wand_contiguous_action.setCheckable(True)
+        self.wand_contiguous_action.setChecked(self.canvas.wand_contiguous())
+        self.wand_contiguous_action.setToolTip(
+            "When checked, Magic Wand selects only connected matching pixels. "
+            "When unchecked, all matching colors are selected."
+        )
+        self.wand_contiguous_action.toggled.connect(self._wand_contiguous_changed)
+
+        self.erase_transparent_action = QAction("Erase: Transparent", self)
+        self.erase_transparent_action.setCheckable(True)
+        self.erase_transparent_action.setToolTip(
+            "Delete clears the pixel selection to transparent."
+        )
+        self.erase_fill_action = QAction("Erase: Fill color", self)
+        self.erase_fill_action.setCheckable(True)
+        self.erase_fill_action.setToolTip(
+            "Delete fills the pixel selection with the current Fill color."
+        )
+        erase_group = QActionGroup(self)
+        erase_group.setExclusive(True)
+        erase_group.addAction(self.erase_transparent_action)
+        erase_group.addAction(self.erase_fill_action)
+        if self.canvas.erase_mode() == ERASE_MODE_FILL:
+            self.erase_fill_action.setChecked(True)
+        else:
+            self.erase_transparent_action.setChecked(True)
+        self.erase_transparent_action.triggered.connect(self._erase_mode_action_changed)
+        self.erase_fill_action.triggered.connect(self._erase_mode_action_changed)
+
+        selection_tools = (
+            Tool.SELECT_RECT,
+            Tool.SELECT_ELLIPSE,
+            Tool.SELECT_PATH,
+        )
+        erase_menu = QMenu(self)
+        erase_menu.addAction(self.erase_transparent_action)
+        erase_menu.addAction(self.erase_fill_action)
+        for tool_key in selection_tools:
+            button = self._tool_buttons[tool_key]
+            button.setMenu(erase_menu)
+            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+            button.setFixedSize(40, 28)
+
+        wand_menu = QMenu(self)
+        wand_menu.addAction(self.wand_contiguous_action)
+        wand_menu.addSeparator()
+        wand_menu.addAction(self.erase_transparent_action)
+        wand_menu.addAction(self.erase_fill_action)
+        wand_button = self._tool_buttons[Tool.MAGIC_WAND]
+        wand_button.setMenu(wand_menu)
+        wand_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        wand_button.setFixedSize(40, 28)
+
+    def _popup_pixel_tool_options(self, tool: str) -> None:
+        """
+        Opens the option menu for one pixel-selection toolbar tool.
+
+        Args:
+            tool: Tool identifier.
+
+        Returns:
+            None
+        """
+
+        button = self._tool_buttons.get(tool)
+        if button is None:
+            return
+        menu = button.menu()
+        if menu is None:
+            return
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
     def _set_tool(self, tool: str) -> None:
         """
@@ -1687,8 +1748,17 @@ class EditorWindow(QMainWindow):
         if self._locked_tool is not None and tool != self._locked_tool:
             self._clear_tool_lock()
 
+        already_active = self._active_tool == tool
         self._set_tool(tool)
         self._one_shot_tool = tool if self._is_lockable_tool(tool) else None
+        # Re-clicking an active pixel tool opens its options popup immediately.
+        if already_active and tool in {
+            Tool.SELECT_RECT,
+            Tool.SELECT_ELLIPSE,
+            Tool.SELECT_PATH,
+            Tool.MAGIC_WAND,
+        }:
+            self._popup_pixel_tool_options(tool)
 
     def _toggle_tool_lock(self, tool: str) -> None:
         """
@@ -1962,6 +2032,7 @@ class EditorWindow(QMainWindow):
             None
         """
 
+        self.stroke_size_label.setText(str(int(value)))
         self._set_next_history_label("Change border width")
         self.canvas.set_style(stroke_width=float(value))
         self._push_history_state()
@@ -2004,21 +2075,23 @@ class EditorWindow(QMainWindow):
         """
 
         self.canvas.set_wand_contiguous(checked)
+        if self.wand_contiguous_action.isChecked() != checked:
+            self.wand_contiguous_action.blockSignals(True)
+            self.wand_contiguous_action.setChecked(checked)
+            self.wand_contiguous_action.blockSignals(False)
 
-    def _erase_mode_changed(self, _index: int) -> None:
+    def _erase_mode_action_changed(self) -> None:
         """
-        Updates Delete-key erase mode for pixel selections.
-
-        Args:
-            _index: Combo box index.
+        Applies Delete-key erase mode from the toolbar popup actions.
 
         Returns:
             None
         """
 
-        mode = self.erase_mode_combo.currentData()
-        if isinstance(mode, str):
-            self.canvas.set_erase_mode(mode)
+        if self.erase_fill_action.isChecked():
+            self.canvas.set_erase_mode(ERASE_MODE_FILL)
+        else:
+            self.canvas.set_erase_mode(ERASE_MODE_TRANSPARENT)
 
     def _stroke_style_changed(self, _index: int) -> None:
         """
@@ -2472,9 +2545,11 @@ class EditorWindow(QMainWindow):
 
         stroke_width = payload.get("stroke_width")
         if isinstance(stroke_width, (float, int)):
-            self.stroke_size_spin.blockSignals(True)
-            self.stroke_size_spin.setValue(max(1, int(stroke_width)))
-            self.stroke_size_spin.blockSignals(False)
+            width_value = max(1, min(64, int(stroke_width)))
+            self.stroke_size_slider.blockSignals(True)
+            self.stroke_size_slider.setValue(width_value)
+            self.stroke_size_slider.blockSignals(False)
+            self.stroke_size_label.setText(str(width_value))
 
         stroke_rgba = payload.get("stroke_rgba")
         if isinstance(stroke_rgba, list) and len(stroke_rgba) == 4:
@@ -4396,16 +4471,39 @@ class EditorWindow(QMainWindow):
             None
         """
 
-        QMessageBox.information(
-            self,
-            "Manual",
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manual")
+        dialog.setModal(True)
+        dialog.resize(720, 560)
+        dialog.setMinimumSize(640, 420)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        text = QPlainTextEdit(dialog)
+        text.setReadOnly(True)
+        text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        text.setPlainText(
             "How it works:\n"
             "1) Use the capture panel to create a screenshot.\n"
             "2) Annotate with tools in the top bar.\n"
             "3) Save project, export image, or print from File menu.\n\n"
-            "Open Help → Tools for icon explanations.\n\n"
-            + build_shortcuts_reference_text(self._editor_shortcut_overrides),
+            "Open the ? toolbar button for icon explanations.\n\n"
+            + build_shortcuts_reference_text(self._editor_shortcut_overrides)
         )
+        text.setUndoRedoEnabled(False)
+        text.moveCursor(QTextCursor.MoveOperation.Start)
+        layout.addWidget(text, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
+        if close_button is not None:
+            close_button.clicked.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog.exec()
 
     def show_tools_reference(self) -> None:
         """

@@ -42,17 +42,18 @@ TOOL_HELP_ENTRIES: tuple[ToolHelpEntry, ...] = (
     ToolHelpEntry(
         tool=Tool.SELECT_RECT,
         name="Marquee",
-        tooltip_blurb="rectangular pixel selection on the image",
+        tooltip_blurb="rectangular pixel selection; menu sets Delete erase mode",
         description=(
             "Draws a rectangular pixel selection on the screenshot. "
-            "Use Fill, Brush, or Delete on that selection. Hold Shift to add to the selection."
+            "Use Fill, Brush, or Delete on that selection. "
+            "Open the tool menu for Delete erase mode. Hold Shift to add to the selection."
         ),
         shortcut_hint="M",
     ),
     ToolHelpEntry(
         tool=Tool.SELECT_ELLIPSE,
         name="Ellipse Select",
-        tooltip_blurb="elliptical pixel selection",
+        tooltip_blurb="elliptical pixel selection; menu sets Delete erase mode",
         description=(
             "Draws an elliptical pixel selection on the screenshot. "
             "Hold Shift to add to the existing selection."
@@ -62,7 +63,7 @@ TOOL_HELP_ENTRIES: tuple[ToolHelpEntry, ...] = (
     ToolHelpEntry(
         tool=Tool.SELECT_PATH,
         name="Lasso",
-        tooltip_blurb="freehand pixel selection; double-click closes",
+        tooltip_blurb="freehand pixel selection; menu sets Delete erase mode",
         description=(
             "Draws a freehand (lasso) pixel selection. Double-click to close the path. "
             "Hold Shift to add to the existing selection."
@@ -72,10 +73,11 @@ TOOL_HELP_ENTRIES: tuple[ToolHelpEntry, ...] = (
     ToolHelpEntry(
         tool=Tool.MAGIC_WAND,
         name="Magic Wand",
-        tooltip_blurb="select similar background colors",
+        tooltip_blurb="select similar colors; menu for Contiguous & erase",
         description=(
             "Selects connected or similar background pixels by color. "
-            "Adjust tolerance and Contiguous in the Style panel. Hold Shift to add."
+            "Adjust tolerance in the Style panel. Use the tool menu for Contiguous "
+            "and Delete erase mode. Hold Shift to add."
         ),
         shortcut_hint="W",
     ),
