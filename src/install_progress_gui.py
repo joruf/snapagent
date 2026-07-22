@@ -4,6 +4,7 @@ Tkinter progress dialog for first-time dependency installation.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -32,18 +33,46 @@ def map_installer_line_to_status(line: str) -> str | None:
         return None
     lowered = normalized.lower()
     if "installing system dependencies" in lowered:
-        return "Installing Linux system packages (sudo may be required)..."
+        return "Installing Linux system packages..."
     if "requesting administrator rights via pkexec" in lowered:
         return "Waiting for administrator password dialog..."
+    if "required system packages are present" in lowered:
+        return "System packages ready. Continuing setup..."
     if "creating virtual environment" in lowered:
         return "Creating Python virtual environment..."
     if "installing dependencies" in lowered:
         return "Installing Python packages (PySide6, Pillow, requests, pynput)..."
+    if "done with warnings" in lowered:
+        return "Installation finished with warnings. Starting Snappix..."
     if "done." in lowered:
         return "Installation complete. Starting Snappix..."
     if "error" in lowered or "warning" in lowered:
         return normalized
     return None
+
+
+def summarize_installer_failure(log_lines: list[str], max_lines: int = 8) -> str:
+    """
+    Builds a short failure summary from installer log lines.
+
+    Args:
+        log_lines: Captured installer output lines.
+        max_lines: Maximum number of trailing lines to include.
+
+    Returns:
+        str: User-facing failure details.
+    """
+
+    cleaned = [line.strip() for line in log_lines if line.strip()]
+    if not cleaned:
+        return "No installer output was captured."
+    interesting = [
+        line
+        for line in cleaned
+        if "error" in line.lower() or "warning" in line.lower() or "failed" in line.lower()
+    ]
+    selected = interesting[-max_lines:] if interesting else cleaned[-max_lines:]
+    return "\n".join(selected)
 
 
 def _monitor_geometry_for_point(x_pos: int, y_pos: int) -> tuple[int, int, int, int] | None:
@@ -125,7 +154,10 @@ def run_installer_with_progress_gui() -> int:
 
     ttk.Label(
         frame,
-        text="If prompted, enter your password in the terminal for system packages.",
+        text=(
+            "If an administrator dialog appears, confirm it to install system packages.\n"
+            "Python packages are installed automatically into a local .venv."
+        ),
         font=("", 9),
         foreground="#555555",
         wraplength=440,
@@ -133,16 +165,21 @@ def run_installer_with_progress_gui() -> int:
     ).grid(row=3, column=0)
 
     exit_code_holder: list[int] = [1]
+    log_lines: list[str] = []
 
     def run_installer() -> None:
-        command = [sys.executable, str(INSTALLER_SCRIPT)]
+        command = [sys.executable, "-u", str(INSTALLER_SCRIPT)]
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
         process = subprocess.Popen(
             command,
             cwd=str(PROJECT_ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
             text=True,
             bufsize=1,
+            env=env,
         )
         if process.stdout is None:
             exit_code_holder[0] = 1
@@ -150,6 +187,7 @@ def run_installer_with_progress_gui() -> int:
             return
 
         for line in process.stdout:
+            log_lines.append(line.rstrip("\n"))
             status = map_installer_line_to_status(line)
             if status is not None:
                 root.after(0, lambda message=status: status_var.set(message))
@@ -180,10 +218,13 @@ def run_installer_with_progress_gui() -> int:
     exit_code = exit_code_holder[0]
 
     if exit_code != 0:
+        details = summarize_installer_failure(log_lines)
         messagebox.showerror(
             "Snappix",
-            "Dependency installation failed.\n"
-            "Check terminal output or run: python3 install_dependencies.py",
+            "Dependency installation failed.\n\n"
+            f"{details}\n\n"
+            "You can retry with:\n"
+            "python3 install_dependencies.py",
         )
 
     root.destroy()
