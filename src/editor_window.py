@@ -1872,7 +1872,29 @@ class EditorWindow(QMainWindow):
         action_label = self.canvas.consume_last_action_label()
         self._set_next_history_label(action_label)
         self._push_history_state()
+        self._show_canvas_action_notification(action_label)
         self._apply_one_shot_tool_completion(action_label)
+
+    def _show_canvas_action_notification(self, action_label: str) -> None:
+        """
+        Shows user-facing notifications for important canvas actions.
+
+        Args:
+            action_label: Last canvas action label.
+
+        Returns:
+            None
+        """
+
+        message_by_action = {
+            "Copy OCR text": "OCR text copied to clipboard.",
+            "OCR found no text": "OCR completed, but no text was found.",
+            "OCR unavailable: install tesseract-ocr": "OCR unavailable. Please install tesseract-ocr.",
+        }
+        message = message_by_action.get(action_label)
+        if message is None:
+            return
+        self.statusBar().showMessage(message, 4500)
 
     def _apply_one_shot_tool_completion(self, action_label: str) -> None:
         """

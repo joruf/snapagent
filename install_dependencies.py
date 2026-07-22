@@ -13,10 +13,10 @@ from pathlib import Path
 from shutil import which
 
 SYSTEM_PACKAGE_MAP: dict[str, list[str]] = {
-    "apt-get": ["libxcb-cursor0", "xdotool", "x11-utils"],
-    "dnf": ["xcb-util-cursor", "xdotool", "xwininfo"],
-    "pacman": ["xcb-util-cursor", "xdotool", "xorg-xwininfo"],
-    "zypper": ["libxcb-cursor0", "xdotool", "xwininfo"],
+    "apt-get": ["libxcb-cursor0", "xdotool", "x11-utils", "tesseract-ocr"],
+    "dnf": ["xcb-util-cursor", "xdotool", "xwininfo", "tesseract"],
+    "pacman": ["xcb-util-cursor", "xdotool", "xorg-xwininfo", "tesseract"],
+    "zypper": ["libxcb-cursor0", "xdotool", "xwininfo", "tesseract-ocr"],
 }
 
 
@@ -38,7 +38,7 @@ def run_command(command: list[str], cwd: Path) -> int:
 
 def detect_missing_system_dependencies() -> list[str]:
     """
-    Detects missing Qt/X11 runtime libraries.
+    Detects missing Qt/X11 and OCR runtime dependencies.
 
     Returns:
         list[str]: Missing dependency keys.
@@ -51,6 +51,8 @@ def detect_missing_system_dependencies() -> list[str]:
         missing.append("xdotool")
     if which("xwininfo") is None:
         missing.append("xwininfo")
+    if which("tesseract") is None:
+        missing.append("tesseract")
     return missing
 
 

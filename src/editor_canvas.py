@@ -84,6 +84,7 @@ from src.crop_item import CropSelectionItem
 from src.image_effects import pixelate_qimage_region
 from src.models import AnnotationModel
 from src.ocr import extract_text_from_png_bytes
+from src.platform import has_tesseract
 from src.scroll_capture import pixmap_to_png_bytes
 from src.theme import THEME_LIGHT, current_theme_name, get_theme_colors, normalize_theme_name
 
@@ -228,6 +229,7 @@ class EditorCanvas(QGraphicsView):
         self._grid_size = 16
         self._blur_block_size = 16
         self._next_step_number = 1
+        self._step_counter_overridden = False
         self._alignment_threshold = 8.0
         self._alignment_guides: list[QLineF] = []
         self._blank_document = False
@@ -897,10 +899,12 @@ class EditorCanvas(QGraphicsView):
             return
 
         if self._tool == Tool.STEP:
-            badge = StepBadgeItem(self._next_step_number)
+            step_number = self._next_available_step_number()
+            badge = StepBadgeItem(step_number)
             badge.setPos(scene_pos.x() - badge.rect().width() / 2.0, scene_pos.y() - badge.rect().height() / 2.0)
             self._scene.addItem(badge)
-            self._next_step_number += 1
+            self._next_step_number = step_number + 1
+            self._step_counter_overridden = False
             self._emit_content_changed("Insert step")
             return
 
@@ -1946,6 +1950,44 @@ class EditorCanvas(QGraphicsView):
         """
 
         self._next_step_number = max(1, int(value))
+        self._step_counter_overridden = True
+
+    def _next_available_step_number(self) -> int:
+        """
+        Resolves the next step number while reusing deleted gaps.
+
+        Returns:
+            int: Next available step number.
+        """
+
+        used_numbers = self._used_step_numbers()
+        if (
+            self._step_counter_overridden
+            and self._next_step_number > 0
+            and self._next_step_number not in used_numbers
+        ):
+            return self._next_step_number
+        candidate = 1
+        while candidate in used_numbers:
+            candidate += 1
+        return candidate
+
+    def _used_step_numbers(self) -> set[int]:
+        """
+        Collects all currently used step numbers from the scene.
+
+        Returns:
+            set[int]: Positive step numbers already present on canvas.
+        """
+
+        numbers: set[int] = set()
+        for item in self._annotation_items():
+            if not isinstance(item, StepBadgeItem):
+                continue
+            number = item.step_number()
+            if number > 0:
+                numbers.add(number)
+        return numbers
 
     def _change_selected_z_order(self, delta: float) -> None:
         """
@@ -1976,6 +2018,9 @@ class EditorCanvas(QGraphicsView):
             None
         """
 
+        if not has_tesseract():
+            self._emit_content_changed("OCR unavailable: install tesseract-ocr")
+            return
         clipped = rect.intersected(self.document_rect()).normalized()
         if clipped.width() < 2 or clipped.height() < 2:
             return

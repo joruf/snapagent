@@ -203,12 +203,14 @@ class TestEditorCanvasTools(unittest.TestCase):
         self.assertEqual(len(step_items), 1)
         self.assertEqual(step_items[0].step_number(), 4)
 
+    @patch("src.editor_canvas.has_tesseract", return_value=True)
     @patch("src.editor_canvas.extract_text_from_png_bytes", return_value="Detected text")
     @patch("src.editor_canvas.QGuiApplication")
     def test_run_ocr_on_region_copies_text_to_clipboard(
         self,
         mock_gui_app: MagicMock,
         _mock_extract: MagicMock,
+        _mock_has_tesseract: MagicMock,
     ) -> None:
         """
         Ensures OCR copies recognized text to the clipboard.
@@ -222,3 +224,68 @@ class TestEditorCanvasTools(unittest.TestCase):
         canvas._run_ocr_on_region(QRectF(10.0, 10.0, 40.0, 30.0))  # pylint: disable=protected-access
 
         clipboard.setText.assert_called_once_with("Detected text")
+
+    @patch("src.editor_canvas.has_tesseract", return_value=False)
+    @patch("src.editor_canvas.extract_text_from_png_bytes")
+    def test_run_ocr_on_region_skips_when_tesseract_missing(
+        self,
+        mock_extract: MagicMock,
+        _mock_has_tesseract: MagicMock,
+    ) -> None:
+        """
+        Ensures OCR does not run extraction when tesseract is unavailable.
+        """
+
+        canvas = EditorCanvas()
+        canvas.set_screenshot(_checkerboard_pixmap(100, 60))
+
+        canvas._run_ocr_on_region(QRectF(10.0, 10.0, 40.0, 30.0))  # pylint: disable=protected-access
+
+        mock_extract.assert_not_called()
+
+    def test_step_insertion_reuses_deleted_gap(self) -> None:
+        """
+        Ensures the Step tool reuses deleted numbering gaps.
+        """
+
+        canvas = EditorCanvas()
+        canvas.set_screenshot(_checkerboard_pixmap(140, 90))
+        canvas.set_tool(Tool.STEP)
+
+        for x_pos in (20.0, 40.0, 60.0, 80.0):
+            press_event = QMouseEvent(
+                QMouseEvent.Type.MouseButtonPress,
+                QPointF(x_pos, 40.0),
+                QPointF(x_pos, 40.0),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            canvas.mousePressEvent(press_event)
+
+        step_items_before = [
+            candidate
+            for candidate in canvas.scene().items()
+            if isinstance(candidate, StepBadgeItem)
+        ]
+        step_three_item = next(
+            item for item in step_items_before if item.step_number() == 3
+        )
+        canvas.scene().removeItem(step_three_item)
+
+        insert_event = QMouseEvent(
+            QMouseEvent.Type.MouseButtonPress,
+            QPointF(100.0, 40.0),
+            QPointF(100.0, 40.0),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        canvas.mousePressEvent(insert_event)
+
+        step_numbers = sorted(
+            candidate.step_number()
+            for candidate in canvas.scene().items()
+            if isinstance(candidate, StepBadgeItem)
+        )
+        self.assertEqual(step_numbers, [1, 2, 3, 4])
