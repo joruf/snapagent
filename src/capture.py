@@ -23,6 +23,8 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QShortcut,
+    QKeySequence,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -63,6 +65,24 @@ class CaptureMode:
 
 
 _ACTIVE_OVERLAYS: list[QWidget] = []
+
+
+def _install_escape_shortcut(widget: QWidget, callback: Callable[[], None]) -> QShortcut:
+    """
+    Register an application-wide Escape shortcut for a temporary capture widget.
+
+    Args:
+        widget: Owner widget for shortcut lifecycle.
+        callback: Function invoked when Escape is pressed.
+
+    Returns:
+        QShortcut: Created shortcut instance.
+    """
+
+    shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), widget)
+    shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+    shortcut.activated.connect(callback)
+    return shortcut
 
 
 @dataclass(slots=True)
@@ -374,6 +394,7 @@ class RegionCaptureOverlay(QWidget):
         )
         self.setGeometry(self._virtual_geometry)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self._escape_shortcut = _install_escape_shortcut(self, self._cancel_capture)
 
     def paintEvent(self, _) -> None:
         """
@@ -471,8 +492,32 @@ class RegionCaptureOverlay(QWidget):
         """
 
         if event.key() == Qt.Key.Key_Escape:
-            self.capture_cancelled.emit()
-            self.close()
+            self._cancel_capture()
+
+    def _cancel_capture(self) -> None:
+        """
+        Cancels region capture and closes the overlay.
+
+        Returns:
+            None
+        """
+
+        self.capture_cancelled.emit()
+        self.close()
+
+    def closeEvent(self, event) -> None:
+        """
+        Releases keyboard grab when region overlay closes.
+
+        Args:
+            event: Qt close event.
+
+        Returns:
+            None
+        """
+
+        self.releaseKeyboard()
+        super().closeEvent(event)
 
 
 
@@ -528,6 +573,7 @@ class ScrollCaptureProgressDialog(QProgressDialog):
             | Qt.WindowType.WindowDoesNotAcceptFocus
         )
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._escape_shortcut = _install_escape_shortcut(self, self.cancel)
 
     def show_centered(self) -> None:
         """
@@ -614,6 +660,7 @@ def execute_scroll_capture(
     overlay.show()
     overlay.raise_()
     overlay.activateWindow()
+    overlay.grabKeyboard()
 
     process = subprocess.Popen(
         ["xdotool", "selectwindow"],
@@ -772,6 +819,7 @@ class WindowCaptureOverlay(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self._escape_shortcut = _install_escape_shortcut(self, self._cancel_capture)
         self._poll_timer.start()
 
     def paintEvent(self, _) -> None:
@@ -876,8 +924,18 @@ class WindowCaptureOverlay(QWidget):
         """
 
         if event.key() == Qt.Key.Key_Escape:
-            self.capture_cancelled.emit()
-            self.close()
+            self._cancel_capture()
+
+    def _cancel_capture(self) -> None:
+        """
+        Cancels window capture and closes the overlay.
+
+        Returns:
+            None
+        """
+
+        self.capture_cancelled.emit()
+        self.close()
 
     def _to_local_rect(self, global_rect: QRect) -> QRect:
         """
@@ -959,6 +1017,7 @@ class ColorPickerOverlay(QWidget):
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._escape_shortcut = _install_escape_shortcut(self, self._cancel_pick)
 
     def paintEvent(self, _) -> None:
         """
@@ -1096,8 +1155,32 @@ class ColorPickerOverlay(QWidget):
         """
 
         if event.key() == Qt.Key.Key_Escape:
-            self.pick_cancelled.emit()
-            self.close()
+            self._cancel_pick()
+
+    def _cancel_pick(self) -> None:
+        """
+        Cancels color picking and closes the overlay.
+
+        Returns:
+            None
+        """
+
+        self.pick_cancelled.emit()
+        self.close()
+
+    def closeEvent(self, event) -> None:
+        """
+        Releases keyboard grab when color picker overlay closes.
+
+        Args:
+            event: Qt close event.
+
+        Returns:
+            None
+        """
+
+        self.releaseKeyboard()
+        super().closeEvent(event)
 
     def _color_at(self, local_pos: QPoint) -> QColor | None:
         """
@@ -1393,6 +1476,7 @@ def execute_color_pick(
     overlay.show()
     overlay.raise_()
     overlay.activateWindow()
+    overlay.grabKeyboard()
 
 
 def execute_capture_request(
@@ -1443,6 +1527,9 @@ def execute_capture_request(
             overlay.capture_cancelled.connect(on_cancel)
             overlay.capture_cancelled.connect(lambda: _untrack_overlay(overlay))
             overlay.show()
+            overlay.raise_()
+            overlay.activateWindow()
+            overlay.grabKeyboard()
             return
 
         if is_wayland_session():

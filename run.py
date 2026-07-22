@@ -39,12 +39,13 @@ _prepare_linux_session_env()
 
 from src.autostart import AutostartManager
 from src.config import (
+    EDITOR_LAST_TAB_CLOSE_WINDOW,
     POST_CAPTURE_CLIPBOARD,
     POST_CAPTURE_SAVE,
     AppConfig,
     ConfigManager,
 )
-from src.constants import ABOUT_GITHUB, APP_NAME
+from src.constants import ABOUT_GITHUB, APP_FILE_EXTENSION, APP_NAME
 from src.theme import (
     THEME_DARK,
     THEME_LIGHT,
@@ -459,8 +460,21 @@ class AppController:
         """
 
         from PySide6.QtCore import Qt, Signal
-        from PySide6.QtGui import QAction, QActionGroup
-        from PySide6.QtWidgets import QMainWindow, QMenu, QMessageBox, QSystemTrayIcon, QTabWidget
+        from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
+        from PySide6.QtWidgets import (
+            QFileDialog,
+            QHBoxLayout,
+            QLabel,
+            QMainWindow,
+            QMenu,
+            QMessageBox,
+            QPushButton,
+            QStackedWidget,
+            QSystemTrayIcon,
+            QTabWidget,
+            QVBoxLayout,
+            QWidget,
+        )
         from src.capture import CapturePanel
 
         class EditorHostWindow(QMainWindow):
@@ -528,11 +542,66 @@ class AppController:
         self.editor_host.setWindowIcon(self._editor_icon)
         self.editor_host.setWindowTitle(f"{APP_NAME} Editor")
         self.editor_host.resize(1240, 860)
-        self.editor_tabs = QTabWidget(self.editor_host)
+        self.editor_stack = QStackedWidget(self.editor_host)
+        self.editor_tabs = QTabWidget(self.editor_stack)
         self.editor_tabs.setTabsClosable(True)
         self.editor_tabs.tabCloseRequested.connect(self._close_editor_tab_by_index)
-        self.editor_host.setCentralWidget(self.editor_tabs)
+        self.editor_empty_state = QWidget(self.editor_stack)
+        empty_layout = QVBoxLayout(self.editor_empty_state)
+        empty_layout.setContentsMargins(40, 40, 40, 40)
+        empty_layout.setSpacing(14)
+        empty_layout.addStretch(1)
+        empty_title = QLabel("No open tabs")
+        empty_title.setObjectName("editorEmptyTitle")
+        empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_title)
+        empty_text = QLabel(
+            "Create a new canvas or open an existing SnapAgent project."
+        )
+        empty_text.setObjectName("editorEmptyText")
+        empty_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_text)
+        empty_actions = QHBoxLayout()
+        empty_actions.setSpacing(10)
+        empty_actions.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        new_canvas_button = QPushButton("New Canvas")
+        new_canvas_button.setToolTip("Create a blank canvas (Ctrl+N).")
+        new_canvas_button.clicked.connect(
+            lambda: self.create_new_canvas_tab(self.editor_host),
+        )
+        empty_actions.addWidget(new_canvas_button)
+        open_project_button = QPushButton("Open Project")
+        open_project_button.setToolTip("Open an existing project file (Ctrl+O).")
+        open_project_button.clicked.connect(self._open_project_from_editor_host)
+        empty_actions.addWidget(open_project_button)
+        empty_layout.addLayout(empty_actions)
+        empty_layout.addStretch(1)
+        self.editor_stack.addWidget(self.editor_empty_state)
+        self.editor_stack.addWidget(self.editor_tabs)
+        self.editor_host.setCentralWidget(self.editor_stack)
+        self._sync_editor_host_view()
+        self._new_canvas_shortcut = QShortcut(
+            QKeySequence("Ctrl+N"),
+            self.editor_host,
+        )
+        self._new_canvas_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._new_canvas_shortcut.activated.connect(
+            lambda: self.create_new_canvas_tab(self.editor_host),
+        )
+        self._open_project_shortcut = QShortcut(
+            QKeySequence("Ctrl+O"),
+            self.editor_host,
+        )
+        self._open_project_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._open_project_shortcut.activated.connect(self._open_project_from_editor_host)
+        self._close_tab_shortcut = QShortcut(
+            QKeySequence("Ctrl+W"),
+            self.editor_host,
+        )
+        self._close_tab_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._close_tab_shortcut.activated.connect(self._close_current_editor_tab)
         self.editor_host.close_requested.connect(self._on_editor_host_close)
+        self._QFileDialog = QFileDialog
 
         self.tray_icon = QSystemTrayIcon(self.app.windowIcon(), self.capture_panel)
         if self._tray_available:
@@ -931,6 +1000,7 @@ class AppController:
         editor.setParent(self.editor_tabs)
         tab_index = self.editor_tabs.addTab(editor, title)
         self.editor_tabs.setCurrentIndex(tab_index)
+        self._sync_editor_host_view()
         editor.show()
         editor.destroyed.connect(lambda *_: self._on_editor_closed(editor))
         self.editors.append(editor)
@@ -1197,9 +1267,6 @@ class AppController:
             None
         """
 
-        if self.editor_tabs.count() == 0:
-            self.create_new_canvas_tab(self.capture_panel)
-            return
         self._show_editor_host()
 
     def create_new_canvas_tab(self, parent=None) -> None:
@@ -1250,17 +1317,15 @@ class AppController:
 
     def _show_editor_host(self) -> None:
         """
-        Shows and focuses the editor host when tabs are available.
+        Shows and focuses the editor host.
 
         Returns:
             None
         """
 
-        if self.editor_tabs.count() <= 0:
-            return
-
         from src.platform import raise_qt_window
 
+        self._sync_editor_host_view()
         self._apply_editor_taskbar_identity()
         self._ensure_editor_host_geometry()
         self.editor_host.show()
@@ -1319,11 +1384,7 @@ class AppController:
             tab_index = self.editor_tabs.indexOf(editor)
             if tab_index >= 0:
                 self.editor_tabs.removeTab(tab_index)
-            if self.editor_tabs.count() == 0:
-                self.editor_host.hide()
-                self.capture_panel.show()
-                self.capture_panel.raise_()
-                self._apply_capture_taskbar_identity()
+            self._handle_empty_editor_tabs()
         except RuntimeError:
             return
 
@@ -1365,7 +1426,64 @@ class AppController:
         if tab_widget in self.editors:
             self.editors.remove(tab_widget)
         tab_widget.deleteLater()
-        if self.editor_tabs.count() == 0:
+        self._handle_empty_editor_tabs()
+
+    def _close_current_editor_tab(self) -> None:
+        """
+        Closes the currently selected editor tab when available.
+
+        Returns:
+            None
+        """
+
+        current_index = self.editor_tabs.currentIndex()
+        if current_index < 0:
+            return
+        self._close_editor_tab_by_index(current_index)
+
+    def _open_project_from_editor_host(self) -> None:
+        """
+        Opens a project file picker from the editor host empty state.
+
+        Returns:
+            None
+        """
+
+        file_path, _ = self._QFileDialog.getOpenFileName(
+            self.editor_host,
+            "Open Project",
+            "",
+            f"{APP_NAME} Project (*{APP_FILE_EXTENSION});;Legacy Project (*.lshot *.json)",
+        )
+        if not file_path:
+            return
+        self._open_project_in_editor(file_path)
+
+    def _sync_editor_host_view(self) -> None:
+        """
+        Switches editor host central view between tabs and empty-state panel.
+
+        Returns:
+            None
+        """
+
+        if self.editor_tabs.count() > 0:
+            self.editor_stack.setCurrentWidget(self.editor_tabs)
+            return
+        self.editor_stack.setCurrentWidget(self.editor_empty_state)
+
+    def _handle_empty_editor_tabs(self) -> None:
+        """
+        Applies configured behavior when no editor tabs remain open.
+
+        Returns:
+            None
+        """
+
+        self._sync_editor_host_view()
+        if self.editor_tabs.count() != 0:
+            return
+        if self.config.editor_last_tab_behavior == EDITOR_LAST_TAB_CLOSE_WINDOW:
             self.editor_host.hide()
             self.capture_panel.show()
             self.capture_panel.raise_()

@@ -10,8 +10,10 @@ from pathlib import Path
 
 from src.config import (
     DEFAULT_HOTKEY_CAPTURE_REGION,
+    DEFAULT_EDITOR_LAST_TAB_BEHAVIOR,
     AppConfig,
     ConfigManager,
+    normalize_editor_last_tab_behavior,
     normalize_hotkey_spec,
     normalize_post_capture_action,
 )
@@ -36,6 +38,10 @@ class TestConfigManager(unittest.TestCase):
             self.assertEqual(config.theme, "dark")
             self.assertTrue(config.hotkeys_enabled)
             self.assertEqual(config.hotkey_capture_region, DEFAULT_HOTKEY_CAPTURE_REGION)
+            self.assertEqual(
+                config.editor_last_tab_behavior,
+                DEFAULT_EDITOR_LAST_TAB_BEHAVIOR,
+            )
 
     def test_load_returns_defaults_for_invalid_json(self) -> None:
         """
@@ -51,6 +57,10 @@ class TestConfigManager(unittest.TestCase):
             self.assertEqual(config.theme, "dark")
             self.assertTrue(config.hotkeys_enabled)
             self.assertEqual(config.hotkey_capture_region, DEFAULT_HOTKEY_CAPTURE_REGION)
+            self.assertEqual(
+                config.editor_last_tab_behavior,
+                DEFAULT_EDITOR_LAST_TAB_BEHAVIOR,
+            )
 
     def test_save_and_load_roundtrip(self) -> None:
         """
@@ -66,6 +76,7 @@ class TestConfigManager(unittest.TestCase):
                     theme=THEME_LIGHT,
                     post_capture_action="clipboard",
                     hotkey_capture_window="ctrl+shift+w",
+                    editor_last_tab_behavior="close_window",
                 )
             )
 
@@ -74,6 +85,7 @@ class TestConfigManager(unittest.TestCase):
             self.assertEqual(restored.theme, THEME_LIGHT)
             self.assertEqual(restored.post_capture_action, "clipboard")
             self.assertEqual(restored.hotkey_capture_window, "ctrl+shift+w")
+            self.assertEqual(restored.editor_last_tab_behavior, "close_window")
 
     def test_normalize_hotkey_spec_lowercases_and_trims(self) -> None:
         """
@@ -90,4 +102,12 @@ class TestConfigManager(unittest.TestCase):
 
         self.assertEqual(normalize_post_capture_action("clipboard"), "clipboard")
         self.assertEqual(normalize_post_capture_action("unknown"), "editor")
+
+    def test_normalize_editor_last_tab_behavior_falls_back_to_default(self) -> None:
+        """
+        Ensures invalid last-tab behaviors fall back to keep_open.
+        """
+
+        self.assertEqual(normalize_editor_last_tab_behavior("close_window"), "close_window")
+        self.assertEqual(normalize_editor_last_tab_behavior("invalid"), "keep_open")
 

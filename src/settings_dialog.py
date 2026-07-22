@@ -22,8 +22,10 @@ from PySide6.QtWidgets import (
 )
 
 from src.config import (
+    EDITOR_LAST_TAB_BEHAVIORS,
     POST_CAPTURE_ACTIONS,
     AppConfig,
+    normalize_editor_last_tab_behavior,
     normalize_hotkey_spec,
     normalize_post_capture_action,
 )
@@ -82,6 +84,16 @@ class SettingsDialog(QDialog):
             self.post_capture_combo.setCurrentIndex(current_index)
         form.addRow("After capture:", self.post_capture_combo)
 
+        self.editor_last_tab_combo = QComboBox()
+        for behavior_key, behavior_label in EDITOR_LAST_TAB_BEHAVIORS.items():
+            self.editor_last_tab_combo.addItem(behavior_label, behavior_key)
+        behavior_index = self.editor_last_tab_combo.findData(
+            normalize_editor_last_tab_behavior(config.editor_last_tab_behavior)
+        )
+        if behavior_index >= 0:
+            self.editor_last_tab_combo.setCurrentIndex(behavior_index)
+        form.addRow("When last tab closes:", self.editor_last_tab_combo)
+
         save_directory_row = QHBoxLayout()
         self.save_directory_edit = QLineEdit(config.capture_save_directory)
         self.save_directory_edit.setPlaceholderText("~/Pictures/SnapAgent")
@@ -134,6 +146,9 @@ class SettingsDialog(QDialog):
                 str(self.post_capture_combo.currentData())
             ),
             capture_save_directory=self.save_directory_edit.text().strip(),
+            editor_last_tab_behavior=normalize_editor_last_tab_behavior(
+                str(self.editor_last_tab_combo.currentData())
+            ),
         )
 
     def _browse_save_directory(self) -> None:

@@ -7,7 +7,11 @@ from __future__ import annotations
 import unittest
 
 try:
-    from src.config import AppConfig, POST_CAPTURE_CLIPBOARD
+    from src.config import (
+        AppConfig,
+        EDITOR_LAST_TAB_CLOSE_WINDOW,
+        POST_CAPTURE_CLIPBOARD,
+    )
     from src.settings_dialog import SettingsDialog
     from tests.qt_test_utils import ensure_qapp
 
@@ -51,6 +55,9 @@ class TestSettingsDialog(unittest.TestCase):
         dialog.post_capture_combo.setCurrentIndex(
             dialog.post_capture_combo.findData(POST_CAPTURE_CLIPBOARD)
         )
+        dialog.editor_last_tab_combo.setCurrentIndex(
+            dialog.editor_last_tab_combo.findData(EDITOR_LAST_TAB_CLOSE_WINDOW)
+        )
         dialog.save_directory_edit.setText("  /home/user/Pictures  ")
 
         config = dialog.build_config()
@@ -60,6 +67,7 @@ class TestSettingsDialog(unittest.TestCase):
         self.assertEqual(config.hotkey_capture_fullscreen, "ctrl+shift+f1")
         self.assertEqual(config.post_capture_action, POST_CAPTURE_CLIPBOARD)
         self.assertEqual(config.capture_save_directory, "/home/user/Pictures")
+        self.assertEqual(config.editor_last_tab_behavior, EDITOR_LAST_TAB_CLOSE_WINDOW)
 
     def test_build_config_preserves_autostart_and_theme(self) -> None:
         """

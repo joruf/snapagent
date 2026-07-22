@@ -27,6 +27,20 @@ POST_CAPTURE_ACTIONS = {
     POST_CAPTURE_SAVE: "Save to folder",
 }
 
+EDITOR_LAST_TAB_KEEP_OPEN = "keep_open"
+EDITOR_LAST_TAB_CLOSE_WINDOW = "close_window"
+DEFAULT_EDITOR_LAST_TAB_BEHAVIOR = EDITOR_LAST_TAB_KEEP_OPEN
+VALID_EDITOR_LAST_TAB_BEHAVIORS = frozenset(
+    {
+        EDITOR_LAST_TAB_KEEP_OPEN,
+        EDITOR_LAST_TAB_CLOSE_WINDOW,
+    }
+)
+EDITOR_LAST_TAB_BEHAVIORS = {
+    EDITOR_LAST_TAB_KEEP_OPEN: "Keep editor window open",
+    EDITOR_LAST_TAB_CLOSE_WINDOW: "Close editor window",
+}
+
 DEFAULT_HOTKEY_CAPTURE_REGION = "ctrl+shift+a"
 DEFAULT_HOTKEY_CAPTURE_WINDOW = "ctrl+shift+w"
 DEFAULT_HOTKEY_CAPTURE_FULLSCREEN = "ctrl+shift+f"
@@ -63,6 +77,22 @@ def normalize_post_capture_action(action: str) -> str:
     return DEFAULT_POST_CAPTURE_ACTION
 
 
+def normalize_editor_last_tab_behavior(behavior: str) -> str:
+    """
+    Returns a supported editor behavior for closing the last tab.
+
+    Args:
+        behavior: Requested last-tab behavior identifier.
+
+    Returns:
+        str: Valid last-tab behavior.
+    """
+
+    if behavior in VALID_EDITOR_LAST_TAB_BEHAVIORS:
+        return behavior
+    return DEFAULT_EDITOR_LAST_TAB_BEHAVIOR
+
+
 @dataclass(slots=True)
 class AppConfig:
     """
@@ -77,6 +107,7 @@ class AppConfig:
         hotkey_capture_fullscreen: Hotkey for fullscreen capture.
         post_capture_action: Action after a successful capture.
         capture_save_directory: Optional folder for automatic capture saves.
+        editor_last_tab_behavior: Behavior when the last editor tab is closed.
     """
 
     autostart_enabled: bool = False
@@ -87,6 +118,7 @@ class AppConfig:
     hotkey_capture_fullscreen: str = DEFAULT_HOTKEY_CAPTURE_FULLSCREEN
     post_capture_action: str = DEFAULT_POST_CAPTURE_ACTION
     capture_save_directory: str = ""
+    editor_last_tab_behavior: str = DEFAULT_EDITOR_LAST_TAB_BEHAVIOR
 
 
 class ConfigManager:
@@ -140,6 +172,14 @@ class ConfigManager:
                 str(payload.get("post_capture_action", DEFAULT_POST_CAPTURE_ACTION))
             ),
             capture_save_directory=str(payload.get("capture_save_directory", "")).strip(),
+            editor_last_tab_behavior=normalize_editor_last_tab_behavior(
+                str(
+                    payload.get(
+                        "editor_last_tab_behavior",
+                        DEFAULT_EDITOR_LAST_TAB_BEHAVIOR,
+                    )
+                )
+            ),
         )
 
     def save(self, config: AppConfig) -> None:
@@ -165,6 +205,9 @@ class ConfigManager:
             ),
             "post_capture_action": normalize_post_capture_action(config.post_capture_action),
             "capture_save_directory": config.capture_save_directory.strip(),
+            "editor_last_tab_behavior": normalize_editor_last_tab_behavior(
+                config.editor_last_tab_behavior
+            ),
         }
         self.config_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=True),
