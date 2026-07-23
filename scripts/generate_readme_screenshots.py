@@ -226,7 +226,7 @@ def _build_editor_sample_screenshot() -> QPixmap:
     painter.drawText(
         card_rect.adjusted(18, 48, -18, -18),
         Qt.AlignmentFlag.AlignTop,
-        "Add arrows, numbered steps, blur regions,\nand text callouts on the gray pasteboard.",
+        "Add arrows, numbered steps, blur regions,\nbrush strokes, and text callouts.",
     )
 
     button_rect = QRect(28, 360, 180, 44)
@@ -270,7 +270,18 @@ def _sample_annotations() -> list[AnnotationModel]:
             stroke_rgba=[46, 204, 113, 255],
             fill_rgba=[46, 204, 113, 0],
             stroke_width=4.0,
-            payload={"z_index": 2.0},
+            payload={"z_index": 2.0, "stroke_style": "solid"},
+        ),
+        AnnotationModel(
+            annotation_type="line",
+            x=40.0,
+            y=340.0,
+            width=360.0,
+            height=0.0,
+            stroke_rgba=[52, 152, 219, 255],
+            fill_rgba=[0, 0, 0, 0],
+            stroke_width=3.0,
+            payload={"z_index": 2.5, "stroke_style": "dash"},
         ),
         AnnotationModel(
             annotation_type="step",
@@ -286,16 +297,22 @@ def _sample_annotations() -> list[AnnotationModel]:
         AnnotationModel(
             annotation_type="text",
             x=690.0,
-            y=188.0,
-            width=220.0,
-            height=48.0,
-            stroke_rgba=[15, 23, 42, 255],
-            fill_rgba=[255, 255, 255, 0],
-            stroke_width=1.0,
+            y=178.0,
+            width=240.0,
+            height=56.0,
+            stroke_rgba=[52, 73, 94, 255],
+            fill_rgba=[255, 255, 255, 230],
+            stroke_width=2.0,
             text="Highlight key UI areas",
             font_size=15,
             font_family="Sans Serif",
-            payload={"z_index": 4.0, "text_style": "plain"},
+            payload={
+                "z_index": 4.0,
+                "text_style": "box",
+                "text_rgba": [15, 23, 42, 255],
+                "box_padding": 8.0,
+                "corner_radius": 6.0,
+            },
         ),
     ]
 

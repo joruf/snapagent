@@ -112,16 +112,17 @@ class TestDesignerPhase1(unittest.TestCase):
         canvas._brush_painting = True  # pylint: disable=protected-access
         canvas._brush_erase_mode = False  # pylint: disable=protected-access
         canvas._brush_stroke_dirty = False  # pylint: disable=protected-access
+        canvas._begin_brush_stroke()  # pylint: disable=protected-access
         canvas._paint_brush_segment(QPointF(10, 10), QPointF(20, 12))  # pylint: disable=protected-access
         canvas._paint_brush_segment(QPointF(20, 12), QPointF(40, 30))  # pylint: disable=protected-access
-        canvas._emit_content_changed("Brush stroke")  # pylint: disable=protected-access
+        canvas._finish_brush_stroke(commit=True)  # pylint: disable=protected-access
         self.assertEqual(len(window._history), before + 1)  # pylint: disable=protected-access
         self.assertEqual(window._history_labels[-1], "Brush stroke")  # pylint: disable=protected-access
         window.close()
 
-    def test_stroke_width_slider_defers_history_while_dragging(self) -> None:
+    def test_selection_width_change_records_history(self) -> None:
         """
-        Ensures border width history is not pushed on every drag tick.
+        Ensures changing a selected element's width creates one undo step.
         """
 
         window = EditorWindow(_solid_pixmap(120, 80))
@@ -139,12 +140,7 @@ class TestDesignerPhase1(unittest.TestCase):
         for item in window.canvas._annotation_items():  # pylint: disable=protected-access
             item.setSelected(True)
         before = len(window._history)  # pylint: disable=protected-access
-        window.stroke_size_slider.setSliderDown(True)
-        window._stroke_width_changed(12)  # pylint: disable=protected-access
-        window._stroke_width_changed(18)  # pylint: disable=protected-access
-        self.assertEqual(len(window._history), before)  # pylint: disable=protected-access
-        window.stroke_size_slider.setSliderDown(False)
-        window._stroke_width_committed()  # pylint: disable=protected-access
+        window._apply_tool_stroke_width(18, tool="rect", persist=False)  # pylint: disable=protected-access
         self.assertEqual(len(window._history), before + 1)  # pylint: disable=protected-access
         self.assertEqual(window._history_labels[-1], "Change border width")  # pylint: disable=protected-access
         window.close()
@@ -282,7 +278,7 @@ class TestDesignerPhase1(unittest.TestCase):
         window = EditorWindow(_solid_pixmap(80, 60))
         self.assertIn(Tool.ERASER, window._tool_buttons)  # pylint: disable=protected-access
         self.assertIn(Tool.EYEDROPPER, window._tool_buttons)  # pylint: disable=protected-access
-        self.assertTrue(window.brush_hardness_label.text().endswith("%"))
+        self.assertIn(Tool.BRUSH, window._tool_hardness_sliders)  # pylint: disable=protected-access
         self.assertTrue(hasattr(window, "export_scale_combo"))
         window.close()
 

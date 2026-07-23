@@ -35,6 +35,9 @@ from src.config import (
     normalize_editor_last_tab_behavior,
     normalize_hotkey_spec,
     normalize_post_capture_action,
+    normalize_tool_brush_hardness,
+    normalize_tool_stroke_styles,
+    normalize_tool_stroke_widths,
     sanitize_editor_shortcut_map,
 )
 from src.global_hotkeys import GlobalHotkeyManager, hotkey_spec_to_pynput
@@ -339,6 +342,9 @@ class SettingsDialog(QDialog):
             batch_export_last_directory=self._config.batch_export_last_directory,
             auto_crop_on_shrink=self.auto_crop_on_shrink_checkbox.isChecked(),
             editor_shortcuts=sanitize_editor_shortcut_map(self._collect_editor_shortcuts()),
+            tool_stroke_widths=normalize_tool_stroke_widths(self._config.tool_stroke_widths),
+            tool_brush_hardness=normalize_tool_brush_hardness(self._config.tool_brush_hardness),
+            tool_stroke_styles=normalize_tool_stroke_styles(self._config.tool_stroke_styles),
         )
 
     def _browse_save_directory(self) -> None:

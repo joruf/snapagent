@@ -12,8 +12,11 @@ if TYPE_CHECKING:
 
 THEME_DARK = "dark"
 THEME_LIGHT = "light"
-VALID_THEMES = frozenset({THEME_DARK, THEME_LIGHT})
+THEME_SLATE = "slate"
+THEME_SEPIA = "sepia"
+VALID_THEMES = frozenset({THEME_DARK, THEME_LIGHT, THEME_SLATE, THEME_SEPIA})
 DEFAULT_THEME = THEME_DARK
+_LIGHT_FAMILY_THEMES = frozenset({THEME_LIGHT, THEME_SEPIA})
 
 _current_theme = DEFAULT_THEME
 
@@ -118,15 +121,75 @@ _LIGHT_COLORS = ThemeColors(
     editor_document_border="#8b939e",
 )
 
+_SLATE_COLORS = ThemeColors(
+    window_bg="#1a2332",
+    surface="#243044",
+    surface_alt="#1e293b",
+    text="#e8eef6",
+    text_muted="#94a3b8",
+    border="#3d4f66",
+    border_strong="#526781",
+    accent="#38bdf8",
+    accent_hover="#7dd3fc",
+    button_bg="#2c3b50",
+    button_hover="#3a4d66",
+    button_checked_text="#0f172a",
+    input_bg="#2c3b50",
+    dropdown_bg="#243044",
+    link="#7dd3fc",
+    link_hover="#bae6fd",
+    palette_border="#64748b",
+    scrollbar_bg="#1e293b",
+    scrollbar_handle="#475569",
+    editor_workspace="#556275",
+    editor_document_border="#334155",
+)
+
+_SEPIA_COLORS = ThemeColors(
+    window_bg="#f3ead8",
+    surface="#faf6eb",
+    surface_alt="#efe4cd",
+    text="#3d2b1f",
+    text_muted="#7a6550",
+    border="#d4c4a8",
+    border_strong="#b8a482",
+    accent="#a67c52",
+    accent_hover="#8b6540",
+    button_bg="#e8dcc4",
+    button_hover="#dccfb0",
+    button_checked_text="#ffffff",
+    input_bg="#fffdf7",
+    dropdown_bg="#faf6eb",
+    link="#8b5a2b",
+    link_hover="#6b4423",
+    palette_border="#b8a482",
+    scrollbar_bg="#efe4cd",
+    scrollbar_handle="#d4c4a8",
+    editor_workspace="#c4b396",
+    editor_document_border="#a89478",
+)
+
 _THEME_COLORS: dict[str, ThemeColors] = {
     THEME_DARK: _DARK_COLORS,
     THEME_LIGHT: _LIGHT_COLORS,
+    THEME_SLATE: _SLATE_COLORS,
+    THEME_SEPIA: _SEPIA_COLORS,
 }
 
-_EDITOR_DARK_ACCENT = "#c73838"
-_EDITOR_DARK_ACCENT_HOVER = "#d64545"
-_EDITOR_LIGHT_ACCENT = "#c73838"
-_EDITOR_LIGHT_ACCENT_HOVER = "#a61f1f"
+# Editor chrome matches the blue logo (assets/snappix.svg).
+_EDITOR_DARK_ACCENT = "#2f7dd1"
+_EDITOR_DARK_ACCENT_HOVER = "#4591e4"
+_EDITOR_LIGHT_ACCENT = "#2563eb"
+_EDITOR_LIGHT_ACCENT_HOVER = "#1d4ed8"
+
+# Capture chrome matches the red logo (assets/snappix-red.svg).
+# Slightly deeper reds + white labels keep WCAG-friendly contrast on bold button text.
+_CAPTURE_DARK_ACCENT = "#b92f2f"
+_CAPTURE_DARK_ACCENT_HOVER = "#d64545"
+_CAPTURE_DARK_ACCENT_TEXT = "#ffffff"
+_CAPTURE_LIGHT_ACCENT = "#b42318"
+_CAPTURE_LIGHT_ACCENT_HOVER = "#8f1c12"
+_CAPTURE_LIGHT_ACCENT_TEXT = "#ffffff"
 
 
 def normalize_theme_name(theme_name: str) -> str:
@@ -189,7 +252,7 @@ def get_theme_colors(theme_name: str | None = None) -> ThemeColors:
 
 def get_editor_accent_colors(theme_name: str | None = None) -> tuple[str, str]:
     """
-    Returns accent colors for editor chrome aligned with the red editor logo.
+    Returns accent colors for editor chrome aligned with the blue editor logo.
 
     Args:
         theme_name: Optional theme identifier; uses current theme when omitted.
@@ -199,9 +262,45 @@ def get_editor_accent_colors(theme_name: str | None = None) -> tuple[str, str]:
     """
 
     resolved = normalize_theme_name(theme_name or _current_theme)
-    if resolved == THEME_LIGHT:
+    if resolved in _LIGHT_FAMILY_THEMES:
         return _EDITOR_LIGHT_ACCENT, _EDITOR_LIGHT_ACCENT_HOVER
     return _EDITOR_DARK_ACCENT, _EDITOR_DARK_ACCENT_HOVER
+
+
+def get_capture_accent_colors(theme_name: str | None = None) -> tuple[str, str]:
+    """
+    Returns accent colors for capture chrome aligned with the red capture logo.
+
+    Args:
+        theme_name: Optional theme identifier; uses current theme when omitted.
+
+    Returns:
+        tuple[str, str]: Accent and hover accent hex colors.
+    """
+
+    resolved = normalize_theme_name(theme_name or _current_theme)
+    if resolved in _LIGHT_FAMILY_THEMES:
+        return _CAPTURE_LIGHT_ACCENT, _CAPTURE_LIGHT_ACCENT_HOVER
+    return _CAPTURE_DARK_ACCENT, _CAPTURE_DARK_ACCENT_HOVER
+
+
+def get_capture_accent_text_color(theme_name: str | None = None) -> str:
+    """
+    Returns the label color used on red capture accent controls.
+
+    All themes use white text on deepened red fills for strong contrast.
+
+    Args:
+        theme_name: Optional theme identifier; uses current theme when omitted.
+
+    Returns:
+        str: Hex text color for capture accent buttons.
+    """
+
+    resolved = normalize_theme_name(theme_name or _current_theme)
+    if resolved in _LIGHT_FAMILY_THEMES:
+        return _CAPTURE_LIGHT_ACCENT_TEXT
+    return _CAPTURE_DARK_ACCENT_TEXT
 
 
 def build_editor_accent_stylesheet(theme_name: str | None = None) -> str:
@@ -232,6 +331,52 @@ def build_editor_accent_stylesheet(theme_name: str | None = None) -> str:
         f" selection-background-color: {accent}; selection-color: {checked_text};"
         f" }}"
         f"#editorHost QMenu::item:selected {{ background: {accent}; color: {checked_text}; }}"
+    )
+
+
+def build_capture_accent_stylesheet(theme_name: str | None = None) -> str:
+    """
+    Builds capture-only accent overrides scoped to the capture panel.
+
+    Args:
+        theme_name: Optional theme identifier; uses current theme when omitted.
+
+    Returns:
+        str: Capture accent stylesheet.
+    """
+
+    colors = get_theme_colors(theme_name)
+    accent, accent_hover = get_capture_accent_colors(theme_name)
+    checked_text = get_capture_accent_text_color(theme_name)
+    link = colors.link
+    link_hover = colors.link_hover
+    return (
+        f"#capturePanel QPushButton, #capturePanel QToolButton {{"
+        f" font-weight: 700;"
+        f" }}"
+        f"#capturePanel QPushButton#linkButton {{"
+        f" color: {link}; font-weight: 700;"
+        f" }}"
+        f"#capturePanel QPushButton#linkButton:hover {{"
+        f" color: {link_hover};"
+        f" }}"
+        f"#capturePanel QToolButton:checked {{"
+        f" background: {accent}; border: 1px solid {accent}; color: {checked_text};"
+        f" }}"
+        f"#capturePanel QPushButton#primaryButton {{"
+        f" background: {accent}; color: {checked_text}; border: none;"
+        f" }}"
+        f"#capturePanel QPushButton#primaryButton:hover {{"
+        f" background: {accent_hover}; color: {checked_text};"
+        f" }}"
+        f"#capturePanel QPushButton:checked {{"
+        f" background: {accent}; border: 1px solid {accent}; color: {checked_text};"
+        f" }}"
+        f"#capturePanel QSlider::handle:horizontal {{ background: {accent}; }}"
+        f"#capturePanel QComboBox QAbstractItemView {{"
+        f" selection-background-color: {accent}; selection-color: {checked_text};"
+        f" }}"
+        f"#capturePanel QMenu::item:selected {{ background: {accent}; color: {checked_text}; }}"
     )
 
 
@@ -294,7 +439,18 @@ def build_application_stylesheet(theme_name: str | None = None) -> str:
         f"QWidget#editorToolbar {{ background: {colors.surface_alt}; }}"
         f"QWidget#editorToolStrip {{ background: transparent; }}"
         f"QWidget#editorToolbar QToolButton, QWidget#editorToolbar QPushButton {{"
-        f" padding: 0px 4px; min-height: 18px; max-height: 28px;"
+        f" padding: 0px 4px; min-height: 18px; max-height: 34px;"
+        f" }}"
+        f"QWidget#editorToolStrip QToolButton {{"
+        f" padding-left: 0px; padding-right: 6px;"
+        f" }}"
+        f"QWidget#editorToolStrip QToolButton::menu-button {{"
+        f" width: 20px;"
+        f" }}"
+        # Offset the icon into the left content area; Qt otherwise centers it
+        # across the full button width including the menu arrow strip.
+        f"QWidget#editorToolStrip QToolButton[menuTool=\"true\"] {{"
+        f" padding-left: 0px; padding-right: 18px;"
         f" }}"
         f"QWidget#editorToolbar QComboBox, QWidget#editorToolbar QSpinBox,"
         f" QWidget#editorToolbar QDoubleSpinBox {{"

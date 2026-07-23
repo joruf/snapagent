@@ -14,6 +14,7 @@ import requests
 from PySide6.QtCore import (
     QByteArray,
     QBuffer,
+    QElapsedTimer,
     QIODevice,
     QPoint,
     QPointF,
@@ -61,6 +62,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from src.annotation_items import (
@@ -80,6 +82,8 @@ from src.annotation_items import (
     color_to_list,
     configure_graphics_item,
     create_pen,
+    apply_stroke_width_to_pen,
+    pen_stroke_width,
     normalize_stroke_style,
     stroke_style_to_qt,
     transform_payload_from_item,
@@ -116,6 +120,7 @@ from src.platform import has_tesseract
 from src.scroll_capture import pixmap_to_png_bytes
 from src.theme import (
     THEME_LIGHT,
+    THEME_SEPIA,
     current_theme_name,
     get_editor_accent_colors,
     get_theme_colors,
@@ -312,6 +317,11 @@ class EditorCanvas(QGraphicsView):
         self._brush_stroke_dirty = False
         self._brush_hardness = 80.0
         self._brush_erase_mode = False
+        self._brush_paint_image: QImage | None = None
+        self._brush_clip_region = None
+        self._brush_image_origin = QPointF(0.0, 0.0)
+        self._brush_image_ratio = 1.0
+        self._brush_pixmap_sync_timer = QElapsedTimer()
         self._eyedropper_target = "stroke"
         self._last_ocr_copied_text = ""
 
@@ -371,7 +381,7 @@ class EditorCanvas(QGraphicsView):
         resolved_theme = normalize_theme_name(theme_name or current_theme_name())
         workspace_color = QColor(colors.editor_workspace)
         border_color = QColor(colors.editor_document_border)
-        shadow_alpha = 65 if resolved_theme == THEME_LIGHT else 85
+        shadow_alpha = 65 if resolved_theme in {THEME_LIGHT, THEME_SEPIA} else 85
         shadow_color = QColor(0, 0, 0, shadow_alpha)
 
         self.setBackgroundBrush(QBrush(workspace_color))
@@ -515,6 +525,8 @@ class EditorCanvas(QGraphicsView):
         self._update_workspace_layout()
         self._initial_view_pending = True
         QTimer.singleShot(0, self._apply_initial_screenshot_view)
+        if not self._selected_annotation_items():
+            self._refresh_selection_info()
 
     def _set_screenshot_without_view_reset(
         self,
@@ -627,6 +639,12 @@ class EditorCanvas(QGraphicsView):
             None
         """
 
+        from shiboken6 import isValid
+
+        # Deferred via QTimer.singleShot(0); skip if the canvas was closed first.
+        if not isValid(self):
+            return
+
         screenshot = self.screenshot()
         if screenshot.isNull():
             self._initial_view_pending = False
@@ -634,8 +652,11 @@ class EditorCanvas(QGraphicsView):
             self.zoom_changed.emit(self._zoom_factor)
             return
 
-        viewport_width = self.viewport().width()
-        viewport_height = self.viewport().height()
+        viewport = self.viewport()
+        if viewport is None or not isValid(viewport):
+            return
+        viewport_width = viewport.width()
+        viewport_height = viewport.height()
         if viewport_width <= 1 or viewport_height <= 1:
             return
 
@@ -672,6 +693,8 @@ class EditorCanvas(QGraphicsView):
 
         if self._tool == Tool.CROP and tool != Tool.CROP:
             self.cancel_crop()
+        if self._brush_painting:
+            self._finish_brush_stroke(commit=self._brush_stroke_dirty)
         self._tool = tool
         QApplication.restoreOverrideCursor()
         self._apply_tool_cursor(tool)
@@ -709,12 +732,14 @@ class EditorCanvas(QGraphicsView):
         """
 
         resolved_label = action_label.strip() or "Edit"
+        # Auto-fitting the document is a side effect. Keep the original draw/edit
+        # label so one-shot tools can return to Select after a single use.
         if not self._fitting_document and self._fit_document_to_content():
-            resolved_label = "Resize canvas to fit content"
+            if resolved_label in {"Edit", "Resize canvas to fit content"}:
+                resolved_label = "Resize canvas to fit content"
         self._last_action_label = resolved_label
         self.content_changed.emit()
-        if self._selected_annotation_items():
-            self._refresh_selection_info()
+        self._refresh_selection_info()
 
     def _selected_annotation_items(self) -> list[QGraphicsItem]:
         """
@@ -759,10 +784,11 @@ class EditorCanvas(QGraphicsView):
         if annotation_type in {"rect", "ellipse"}:
             payload["stroke_rgba"] = color_to_list(item.pen().color())
             payload["fill_rgba"] = color_to_list(item.brush().color())
-            payload["stroke_width"] = item.pen().widthF()
+            payload["stroke_width"] = pen_stroke_width(item.pen())
+            payload["stroke_style"] = stroke_style_from_pen(item.pen())
         elif annotation_type in {"line", "arrow"}:
             payload["stroke_rgba"] = color_to_list(item.pen().color())
-            payload["stroke_width"] = item.pen().widthF()
+            payload["stroke_width"] = pen_stroke_width(item.pen())
             payload["stroke_style"] = stroke_style_from_pen(item.pen())
         elif annotation_type == "text":
             if isinstance(item, StyledTextItem):
@@ -802,9 +828,35 @@ class EditorCanvas(QGraphicsView):
 
         return payload
 
+    def _build_document_payload(self) -> dict[str, Any]:
+        """
+        Builds a detail payload for the active document/image area.
+
+        Returns:
+            dict[str, Any]: Document details for the status footer.
+        """
+
+        rect = self.document_rect()
+        screenshot = self.screenshot()
+        payload: dict[str, Any] = {
+            "type": "document",
+            "x": round(rect.x(), 1),
+            "y": round(rect.y(), 1),
+            "width": round(max(0.0, rect.width()), 1),
+            "height": round(max(0.0, rect.height()), 1),
+            "zoom": round(float(self._zoom_factor) * 100.0),
+            "annotation_count": len(self._annotation_items()),
+            "blank": bool(self._blank_document),
+        }
+        if not screenshot.isNull():
+            payload["pixel_width"] = int(screenshot.width())
+            payload["pixel_height"] = int(screenshot.height())
+            payload["dpr"] = float(screenshot.devicePixelRatio())
+        return payload
+
     def _refresh_selection_info(self) -> None:
         """
-        Re-emits selection details for the active annotation selection.
+        Re-emits selection details, or document details when nothing is selected.
 
         Returns:
             None
@@ -812,7 +864,7 @@ class EditorCanvas(QGraphicsView):
 
         selected = self._selected_annotation_items()
         if not selected:
-            self.selection_style_changed.emit({"type": ""})
+            self.selection_style_changed.emit(self._build_document_payload())
             return
         payload = self._build_selection_payload(selected[0])
         if len(selected) > 1:
@@ -890,6 +942,8 @@ class EditorCanvas(QGraphicsView):
         text_style: str | None = None,
         *,
         emit_history: bool = True,
+        apply_to_selection: bool = True,
+        update_active_style: bool = True,
     ) -> None:
         """
         Updates active style options and selected item style.
@@ -909,43 +963,50 @@ class EditorCanvas(QGraphicsView):
             box_padding: Optional text container padding in pixels.
             corner_radius: Optional text container corner radius in pixels.
             emit_history: When False, skips the content-changed history signal.
+            apply_to_selection: When False, only updates the active style used for
+                newly drawn items (used when restoring per-tool widths).
+            update_active_style: When False, leaves the active draw style unchanged
+                and only updates selected annotations (per-element edits).
 
         Returns:
             None
         """
 
-        if stroke_color is not None:
-            self._style.stroke_color = stroke_color
-        if fill_color is not None:
-            self._style.fill_color = fill_color
-        if stroke_width is not None:
-            self._style.stroke_width = stroke_width
-        if font_size is not None:
-            self._style.font_size = font_size
-        if text_color is not None:
-            self._style.text_color = text_color
-        if font_family is not None and font_family.strip():
-            self._style.font_family = font_family.strip()
-        if font_bold is not None:
-            self._style.font_bold = bool(font_bold)
-        if font_italic is not None:
-            self._style.font_italic = bool(font_italic)
-        if font_underline is not None:
-            self._style.font_underline = bool(font_underline)
-        if letter_spacing is not None:
-            self._style.letter_spacing = float(letter_spacing)
-        if line_spacing_factor is not None:
-            self._style.line_spacing_factor = max(0.7, float(line_spacing_factor))
-        if box_padding is not None:
-            self._style.box_padding = max(0.0, float(box_padding))
-        if corner_radius is not None:
-            self._style.corner_radius = max(0.0, float(corner_radius))
-        if stroke_style is not None:
-            self._style.stroke_style = normalize_stroke_style(stroke_style)
-        if text_style is not None:
-            self._style.text_style = text_style
+        if update_active_style:
+            if stroke_color is not None:
+                self._style.stroke_color = stroke_color
+            if fill_color is not None:
+                self._style.fill_color = fill_color
+            if stroke_width is not None:
+                self._style.stroke_width = stroke_width
+            if font_size is not None:
+                self._style.font_size = font_size
+            if text_color is not None:
+                self._style.text_color = text_color
+            if font_family is not None and font_family.strip():
+                self._style.font_family = font_family.strip()
+            if font_bold is not None:
+                self._style.font_bold = bool(font_bold)
+            if font_italic is not None:
+                self._style.font_italic = bool(font_italic)
+            if font_underline is not None:
+                self._style.font_underline = bool(font_underline)
+            if letter_spacing is not None:
+                self._style.letter_spacing = float(letter_spacing)
+            if line_spacing_factor is not None:
+                self._style.line_spacing_factor = max(0.7, float(line_spacing_factor))
+            if box_padding is not None:
+                self._style.box_padding = max(0.0, float(box_padding))
+            if corner_radius is not None:
+                self._style.corner_radius = max(0.0, float(corner_radius))
+            if stroke_style is not None:
+                self._style.stroke_style = normalize_stroke_style(stroke_style)
+            if text_style is not None:
+                self._style.text_style = text_style
 
         changed = False
+        if not apply_to_selection:
+            return
         for item in self._scene.selectedItems():
             annotation_type = str(item.data(ITEM_ROLE_TYPE) or "")
             if bool(item.data(ITEM_ROLE_LOCKED) or False):
@@ -959,8 +1020,16 @@ class EditorCanvas(QGraphicsView):
                 if fill_color is not None:
                     shape_item.setBrush(fill_color)
                 if stroke_width is not None:
+                    shape_item.setPen(
+                        apply_stroke_width_to_pen(
+                            shape_item.pen(),
+                            stroke_width,
+                            stroke_style=stroke_style,
+                        )
+                    )
+                elif stroke_style is not None and shape_item.pen().style() != Qt.PenStyle.NoPen:
                     pen = shape_item.pen()
-                    pen.setWidthF(stroke_width)
+                    pen.setStyle(stroke_style_to_qt(stroke_style))
                     shape_item.setPen(pen)
                 changed = True
             elif annotation_type in {"line", "arrow"}:
@@ -969,23 +1038,36 @@ class EditorCanvas(QGraphicsView):
                 if stroke_color is not None:
                     pen.setColor(stroke_color)
                 if stroke_width is not None:
-                    pen.setWidthF(stroke_width)
-                if stroke_style is not None:
+                    pen = apply_stroke_width_to_pen(
+                        pen,
+                        stroke_width,
+                        stroke_style=stroke_style,
+                    )
+                elif stroke_style is not None and pen.style() != Qt.PenStyle.NoPen:
                     pen.setStyle(stroke_style_to_qt(stroke_style))
                 line_item.setPen(pen)
                 changed = True
             elif annotation_type == "text" and isinstance(item, StyledTextItem):
-                if text_color is not None or stroke_color is not None:
-                    item.set_colors(
-                        text_color=text_color or stroke_color,
-                        stroke_color=stroke_color or text_color,
-                    )
+                if text_color is not None:
+                    item.set_colors(text_color=text_color)
+                if stroke_color is not None:
+                    item.set_colors(stroke_color=stroke_color)
                 if fill_color is not None:
                     item.set_colors(fill_color=fill_color)
-                if font_size is not None or font_family is not None or font_bold is not None or font_italic is not None or font_underline is not None:
-                    font = item._font
+                if stroke_width is not None:
+                    item.set_stroke_width(float(stroke_width))
+                if text_style is not None:
+                    item.set_text_style(text_style)
+                if (
+                    font_size is not None
+                    or font_family is not None
+                    or font_bold is not None
+                    or font_italic is not None
+                    or font_underline is not None
+                ):
+                    font = QFont(item.font())
                     if font_size is not None:
-                        font.setPointSize(font_size)
+                        font.setPointSize(max(1, int(font_size)))
                     if font_family is not None and font_family.strip():
                         font.setFamily(font_family.strip())
                     if font_bold is not None:
@@ -1008,40 +1090,44 @@ class EditorCanvas(QGraphicsView):
                         corner_radius=corner_radius,
                     )
                 changed = True
-            elif annotation_type == "text":
+            elif annotation_type == "text" and isinstance(item, QGraphicsTextItem):
                 text_item = item
                 if text_color is not None:
                     text_item.setDefaultTextColor(text_color)
                 elif stroke_color is not None:
                     text_item.setDefaultTextColor(stroke_color)
-                if font_size is not None:
-                    font = text_item.font()
-                    font.setPointSize(font_size)
-                    text_item.setFont(font)
-                if font_family is not None and font_family.strip():
-                    font = text_item.font()
-                    font.setFamily(font_family.strip())
-                    text_item.setFont(font)
-                if font_bold is not None:
-                    font = text_item.font()
-                    font.setBold(bool(font_bold))
-                    text_item.setFont(font)
-                if font_italic is not None:
-                    font = text_item.font()
-                    font.setItalic(bool(font_italic))
-                    text_item.setFont(font)
-                if font_underline is not None:
-                    font = text_item.font()
-                    font.setUnderline(bool(font_underline))
-                    text_item.setFont(font)
-                if letter_spacing is not None:
-                    font = text_item.font()
-                    font.setLetterSpacing(
-                        QFont.SpacingType.AbsoluteSpacing,
-                        float(letter_spacing),
+                if (
+                    font_size is not None
+                    or font_family is not None
+                    or font_bold is not None
+                    or font_italic is not None
+                    or font_underline is not None
+                    or letter_spacing is not None
+                ):
+                    self._apply_font_to_graphics_text_item(
+                        text_item,
+                        font_size=font_size,
+                        font_family=font_family,
+                        font_bold=font_bold,
+                        font_italic=font_italic,
+                        font_underline=font_underline,
+                        letter_spacing=letter_spacing,
                     )
-                    text_item.setFont(font)
+                if text_style is not None and text_style in {
+                    TEXT_STYLE_BOX,
+                    TEXT_STYLE_BUBBLE,
+                    TEXT_STYLE_PLAIN,
+                }:
+                    # Promote legacy plain items to StyledTextItem so container
+                    # style and live font edits share one update path.
+                    self._replace_graphics_text_with_styled(
+                        text_item,
+                        text_style=text_style,
+                    )
                 changed = True
+        if changed:
+            self._refresh_selection_info()
+            self._sync_resize_overlay_with_target()
         if changed and emit_history:
             self._emit_content_changed("Update selected style")
 
@@ -1156,45 +1242,8 @@ class EditorCanvas(QGraphicsView):
             text = self._prompt_text_input()
             if text:
                 scene_pos = self._snap_point_to_grid(scene_pos)
-                if self._style.text_style in {TEXT_STYLE_BOX, TEXT_STYLE_BUBBLE}:
-                    font = QFont()
-                    font.setPointSize(self._style.font_size)
-                    font.setFamily(self._style.font_family)
-                    font.setBold(self._style.font_bold)
-                    font.setItalic(self._style.font_italic)
-                    font.setUnderline(self._style.font_underline)
-                    item = StyledTextItem(
-                        text=text,
-                        text_style=self._style.text_style,
-                        font=font,
-                        text_color=QColor(self._style.text_color),
-                        fill_color=QColor(self._style.fill_color),
-                        stroke_color=QColor(self._style.stroke_color),
-                        stroke_width=self._style.stroke_width,
-                        letter_spacing=self._style.letter_spacing,
-                        line_spacing_factor=self._style.line_spacing_factor,
-                        box_padding=self._style.box_padding,
-                        corner_radius=self._style.corner_radius,
-                    )
-                    item.setPos(scene_pos)
-                    self._scene.addItem(item)
-                else:
-                    item = self._scene.addText(text)
-                    item.setDefaultTextColor(self._style.text_color)
-                    font = item.font()
-                    font.setPointSize(self._style.font_size)
-                    font.setFamily(self._style.font_family)
-                    font.setBold(self._style.font_bold)
-                    font.setItalic(self._style.font_italic)
-                    font.setUnderline(self._style.font_underline)
-                    font.setLetterSpacing(
-                        QFont.SpacingType.AbsoluteSpacing,
-                        self._style.letter_spacing,
-                    )
-                    item.setFont(font)
-                    item.setPos(scene_pos)
-                    item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
-                    configure_graphics_item(item, "text")
+                item = self._create_text_item(text, scene_pos)
+                self._select_annotation_item(item)
                 self._emit_content_changed("Insert text")
             return
 
@@ -1249,8 +1298,10 @@ class EditorCanvas(QGraphicsView):
             self._brush_last_pos = scene_pos
             self._brush_stroke_dirty = False
             self._brush_erase_mode = self._tool == Tool.ERASER
+            self._begin_brush_stroke()
             self._paint_brush_segment(scene_pos, scene_pos)
-            self.grabMouse()
+            # Grab the viewport only — release is guaranteed in _finish_brush_stroke.
+            self.viewport().grabMouse()
             event.accept()
             return
         if self._tool == Tool.FILL_BG:
@@ -1316,16 +1367,19 @@ class EditorCanvas(QGraphicsView):
         event.accept()
         return True
 
-    def _prompt_text_input(self) -> str:
+    def _prompt_text_input(self, initial_text: str = "") -> str:
         """
         Opens a multi-line text input dialog for text annotations.
+
+        Args:
+            initial_text: Optional text to prefill when editing an existing item.
 
         Returns:
             str: Entered text, empty when cancelled.
         """
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Insert Text")
+        dialog.setWindowTitle("Insert Text" if not initial_text else "Edit Text")
         dialog.setModal(True)
         dialog.resize(420, 240)
 
@@ -1334,6 +1388,9 @@ class EditorCanvas(QGraphicsView):
         root_layout.addWidget(label)
         text_edit = QTextEdit(dialog)
         text_edit.setPlaceholderText("Enter one or multiple lines.")
+        if initial_text:
+            text_edit.setPlainText(initial_text)
+            text_edit.selectAll()
         root_layout.addWidget(text_edit)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
@@ -1346,6 +1403,153 @@ class EditorCanvas(QGraphicsView):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return ""
         return text_edit.toPlainText().strip()
+
+    def _create_text_item(self, text: str, scene_pos: QPointF) -> StyledTextItem:
+        """
+        Creates one styled text annotation using the active draw style.
+
+        Args:
+            text: Visible text content.
+            scene_pos: Insertion position in scene coordinates.
+
+        Returns:
+            StyledTextItem: Created and scene-attached text item.
+        """
+
+        font = QFont()
+        font.setPointSize(max(1, int(self._style.font_size)))
+        font.setFamily(self._style.font_family)
+        font.setBold(self._style.font_bold)
+        font.setItalic(self._style.font_italic)
+        font.setUnderline(self._style.font_underline)
+        item = StyledTextItem(
+            text=text,
+            text_style=self._style.text_style,
+            font=font,
+            text_color=QColor(self._style.text_color),
+            fill_color=QColor(self._style.fill_color),
+            stroke_color=QColor(self._style.stroke_color),
+            stroke_width=self._style.stroke_width,
+            letter_spacing=self._style.letter_spacing,
+            line_spacing_factor=self._style.line_spacing_factor,
+            box_padding=self._style.box_padding,
+            corner_radius=self._style.corner_radius,
+        )
+        item.setPos(scene_pos)
+        self._scene.addItem(item)
+        return item
+
+    def _select_annotation_item(self, item: QGraphicsItem) -> None:
+        """
+        Selects one annotation and refreshes selection-dependent UI state.
+
+        Args:
+            item: Annotation to select.
+
+        Returns:
+            None
+        """
+
+        self._scene.clearSelection()
+        item.setSelected(True)
+        self._refresh_selection_info()
+        self._sync_resize_overlay_with_target()
+
+    def _apply_font_to_graphics_text_item(
+        self,
+        text_item: QGraphicsTextItem,
+        *,
+        font_size: int | None = None,
+        font_family: str | None = None,
+        font_bold: bool | None = None,
+        font_italic: bool | None = None,
+        font_underline: bool | None = None,
+        letter_spacing: float | None = None,
+    ) -> None:
+        """
+        Applies font options to a legacy ``QGraphicsTextItem``.
+
+        Args:
+            text_item: Target text item.
+            font_size: Optional point size.
+            font_family: Optional family name.
+            font_bold: Optional bold flag.
+            font_italic: Optional italic flag.
+            font_underline: Optional underline flag.
+            letter_spacing: Optional absolute letter spacing.
+
+        Returns:
+            None
+        """
+
+        font = QFont(text_item.font())
+        if font_size is not None:
+            font.setPointSize(max(1, int(font_size)))
+        if font_family is not None and font_family.strip():
+            font.setFamily(font_family.strip())
+        if font_bold is not None:
+            font.setBold(bool(font_bold))
+        if font_italic is not None:
+            font.setItalic(bool(font_italic))
+        if font_underline is not None:
+            font.setUnderline(bool(font_underline))
+        if letter_spacing is not None:
+            font.setLetterSpacing(
+                QFont.SpacingType.AbsoluteSpacing,
+                float(letter_spacing),
+            )
+        text_item.setFont(font)
+        text_item.document().setDefaultFont(font)
+
+    def _replace_graphics_text_with_styled(
+        self,
+        text_item: QGraphicsTextItem,
+        *,
+        text_style: str,
+    ) -> StyledTextItem | None:
+        """
+        Replaces a legacy editable text item with a styled text item.
+
+        Args:
+            text_item: Existing ``QGraphicsTextItem``.
+            text_style: Target container style.
+
+        Returns:
+            StyledTextItem | None: Replacement item, or None on failure.
+        """
+
+        if text_item.scene() is not self._scene:
+            return None
+        font = QFont(text_item.font())
+        replacement = StyledTextItem(
+            text=text_item.toPlainText(),
+            text_style=text_style,
+            font=font,
+            text_color=QColor(text_item.defaultTextColor()),
+            fill_color=QColor(self._style.fill_color),
+            stroke_color=QColor(self._style.stroke_color),
+            stroke_width=self._style.stroke_width,
+            letter_spacing=float(font.letterSpacing()),
+            line_spacing_factor=self._style.line_spacing_factor,
+            box_padding=self._style.box_padding,
+            corner_radius=self._style.corner_radius,
+        )
+        replacement.setPos(text_item.pos())
+        replacement.setZValue(text_item.zValue())
+        replacement.setTransform(text_item.transform())
+        locked = bool(text_item.data(ITEM_ROLE_LOCKED) or False)
+        layer_id = text_item.data(ITEM_ROLE_ID)
+        was_selected = text_item.isSelected()
+        self._scene.removeItem(text_item)
+        self._scene.addItem(replacement)
+        if layer_id is not None:
+            replacement.setData(ITEM_ROLE_ID, layer_id)
+        if locked:
+            replacement.setData(ITEM_ROLE_LOCKED, True)
+            replacement.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+        if was_selected:
+            replacement.setSelected(True)
+        return replacement
 
     def _snap_point_to_grid(self, point: QPointF) -> QPointF:
         """
@@ -1386,6 +1590,9 @@ class EditorCanvas(QGraphicsView):
             return
         if self._tool in {Tool.BRUSH, Tool.ERASER} and self._brush_painting and self._brush_last_pos is not None:
             if not (event.buttons() & Qt.MouseButton.LeftButton):
+                # Button state lost without a clean release — finish safely.
+                self._finish_brush_stroke(commit=self._brush_stroke_dirty)
+                event.accept()
                 return
             current = self.mapToScene(event.position().toPoint())
             self._paint_brush_segment(self._brush_last_pos, current)
@@ -1471,13 +1678,7 @@ class EditorCanvas(QGraphicsView):
             self._emit_content_changed(draw_names.get(self._tool, "Draw annotation"))
             return
         if event.button() == Qt.MouseButton.LeftButton and self._tool in {Tool.BRUSH, Tool.ERASER}:
-            self.releaseMouse()
-            if self._brush_painting and self._brush_stroke_dirty:
-                label = "Eraser stroke" if self._brush_erase_mode else "Brush stroke"
-                self._emit_content_changed(label)
-            self._brush_painting = False
-            self._brush_last_pos = None
-            self._brush_stroke_dirty = False
+            self._finish_brush_stroke(commit=self._brush_painting and self._brush_stroke_dirty)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -1512,6 +1713,18 @@ class EditorCanvas(QGraphicsView):
             self._close_path_selection(add=self._path_selection_add)
             event.accept()
             return
+        if event.button() == Qt.MouseButton.LeftButton:
+            hit_item = self._annotation_item_at_view_pos(event.position().toPoint())
+            if isinstance(hit_item, StyledTextItem) and not bool(
+                hit_item.data(ITEM_ROLE_LOCKED) or False
+            ):
+                new_text = self._prompt_text_input(hit_item.text())
+                if new_text and new_text != hit_item.text():
+                    hit_item.set_text(new_text)
+                    self._select_annotation_item(hit_item)
+                    self._emit_content_changed("Edit text")
+                event.accept()
+                return
         super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event) -> None:
@@ -1605,6 +1818,36 @@ class EditorCanvas(QGraphicsView):
             menu.addAction(cancel_crop_action)
         menu.exec(event.globalPos())
 
+    def has_stroke_width_selection(self) -> bool:
+        """
+        Returns whether the selection contains items with editable stroke width.
+
+        Returns:
+            bool: True when at least one selected annotation uses stroke width.
+        """
+
+        for item in self._selected_annotation_items():
+            annotation_type = str(item.data(ITEM_ROLE_TYPE) or "")
+            if annotation_type in {"rect", "ellipse", "line", "arrow"}:
+                return True
+            if annotation_type == "text" and isinstance(item, StyledTextItem):
+                return True
+        return False
+
+    def has_stroke_style_selection(self) -> bool:
+        """
+        Returns whether the selection contains items with editable stroke style.
+
+        Returns:
+            bool: True when at least one selected annotation uses stroke style.
+        """
+
+        for item in self._selected_annotation_items():
+            annotation_type = str(item.data(ITEM_ROLE_TYPE) or "")
+            if annotation_type in {"rect", "ellipse", "line", "arrow"}:
+                return True
+        return False
+
     def zoom_in(self) -> None:
         """
         Zooms into the canvas.
@@ -1637,6 +1880,8 @@ class EditorCanvas(QGraphicsView):
         self.fitInView(self.document_rect(), Qt.AspectRatioMode.KeepAspectRatio)
         self._zoom_factor = 1.0
         self.zoom_changed.emit(self._zoom_factor)
+        if not self._selected_annotation_items():
+            self._refresh_selection_info()
 
     def set_zoom_factor(self, target_zoom: float) -> None:
         """
@@ -1656,6 +1901,8 @@ class EditorCanvas(QGraphicsView):
         self.scale(scale_factor, scale_factor)
         self._zoom_factor = bounded_zoom
         self.zoom_changed.emit(self._zoom_factor)
+        if not self._selected_annotation_items():
+            self._refresh_selection_info()
 
     def _apply_zoom(self, factor: float) -> None:
         """
@@ -1674,6 +1921,8 @@ class EditorCanvas(QGraphicsView):
         self.scale(factor, factor)
         self._zoom_factor = new_zoom
         self.zoom_changed.emit(self._zoom_factor)
+        if not self._selected_annotation_items():
+            self._refresh_selection_info()
 
     def _create_preview_item(self, start: QPointF) -> QGraphicsItem:
         """
@@ -2050,7 +2299,7 @@ class EditorCanvas(QGraphicsView):
 
     def set_eyedropper_target(self, target: str) -> None:
         """
-        Sets whether the eyedropper writes stroke or fill color.
+        Sets whether the color picker writes stroke or fill color.
 
         Args:
             target: ``stroke`` or ``fill``.
@@ -2064,7 +2313,7 @@ class EditorCanvas(QGraphicsView):
 
     def eyedropper_target(self) -> str:
         """
-        Returns the eyedropper color target.
+        Returns the color picker target (stroke or fill).
 
         Returns:
             str: ``stroke`` or ``fill``.
@@ -2092,7 +2341,7 @@ class EditorCanvas(QGraphicsView):
         image_x = int((scene_pos.x() - origin.x()) * ratio)
         image_y = int((scene_pos.y() - origin.y()) * ratio)
         if image_x < 0 or image_y < 0 or image_x >= image.width() or image_y >= image.height():
-            self.status_message.emit("Eyedropper: click inside the document.")
+            self.status_message.emit("Color Picker: click inside the document.")
             return
         sampled = QColor(image.pixelColor(image_x, image_y))
         if self._eyedropper_target == "fill":
@@ -2309,13 +2558,94 @@ class EditorCanvas(QGraphicsView):
             local_path.translate(-origin.x(), -origin.y())
         return rasterize_path_to_mask(local_path, width, height)
 
+    def _begin_brush_stroke(self) -> None:
+        """
+        Prepares a reusable paint buffer for one brush/eraser stroke.
+
+        Full screenshot copies are expensive on large captures. Doing the
+        pixmap→image conversion once per stroke keeps the UI responsive.
+
+        Returns:
+            None
+        """
+
+        screenshot = self.screenshot()
+        if screenshot.isNull():
+            self._brush_paint_image = None
+            self._brush_clip_region = None
+            return
+
+        self._brush_paint_image = screenshot.toImage().convertToFormat(
+            QImage.Format.Format_ARGB32
+        )
+        self._brush_image_origin = QPointF(self.document_rect().topLeft())
+        self._brush_image_ratio = max(1.0, float(screenshot.devicePixelRatio()))
+        self._brush_clip_region = None
+        if self.has_pixel_selection() and self._brush_paint_image is not None:
+            mask = self._active_selection_mask(
+                self._brush_paint_image.width(),
+                self._brush_paint_image.height(),
+            )
+            if mask is not None and mask_has_selection(mask):
+                self._brush_clip_region = region_from_mask(mask)
+        self._brush_pixmap_sync_timer.restart()
+
+    def _finish_brush_stroke(self, *, commit: bool) -> None:
+        """
+        Ends an active brush stroke, syncs pixels, and releases the mouse grab.
+
+        Args:
+            commit: True to push one undo history entry for the stroke.
+
+        Returns:
+            None
+        """
+
+        was_painting = self._brush_painting
+        erase_mode = self._brush_erase_mode
+        if self._brush_paint_image is not None:
+            self._sync_brush_pixmap(force=True)
+        self._brush_paint_image = None
+        self._brush_clip_region = None
+        self._brush_painting = False
+        self._brush_last_pos = None
+        self._brush_stroke_dirty = False
+        grabber = QWidget.mouseGrabber()
+        if grabber is self.viewport() or grabber is self:
+            grabber.releaseMouse()
+        if was_painting and commit:
+            label = "Eraser stroke" if erase_mode else "Brush stroke"
+            self._emit_content_changed(label)
+
+    def _sync_brush_pixmap(self, *, force: bool = False) -> None:
+        """
+        Pushes the in-memory brush buffer to the scene pixmap.
+
+        Args:
+            force: True to sync immediately; otherwise throttles to ~30 FPS.
+
+        Returns:
+            None
+        """
+
+        if self._brush_paint_image is None or self._brush_paint_image.isNull():
+            return
+        if not force and self._brush_pixmap_sync_timer.isValid():
+            if self._brush_pixmap_sync_timer.elapsed() < 33:
+                return
+        painted = QPixmap.fromImage(self._brush_paint_image)
+        painted.setDevicePixelRatio(self._brush_image_ratio)
+        self._background_item.setPixmap(painted)
+        self._brush_pixmap_sync_timer.restart()
+
     def _paint_brush_segment(self, start: QPointF, end: QPointF) -> None:
         """
         Paints one freehand brush or eraser segment onto the screenshot.
 
         Uses the Border color (including alpha) and Width as brush size. Softness
         comes from brush hardness. When a pixel selection is active, painting is
-        clipped to that selection.
+        clipped to that selection. Painting reuses one image buffer for the whole
+        stroke so large screenshots do not freeze the desktop.
 
         Args:
             start: Segment start in document coordinates.
@@ -2325,13 +2655,14 @@ class EditorCanvas(QGraphicsView):
             None
         """
 
-        screenshot = self.screenshot()
-        if screenshot.isNull():
+        if self._brush_paint_image is None or self._brush_paint_image.isNull():
+            self._begin_brush_stroke()
+        image = self._brush_paint_image
+        if image is None or image.isNull():
             return
-        image = screenshot.toImage().convertToFormat(QImage.Format.Format_ARGB32)
 
-        origin = self.document_rect().topLeft()
-        ratio = max(1.0, float(screenshot.devicePixelRatio()))
+        origin = self._brush_image_origin
+        ratio = self._brush_image_ratio
 
         def to_image_point(point: QPointF) -> QPointF:
             return QPointF(
@@ -2344,11 +2675,6 @@ class EditorCanvas(QGraphicsView):
         brush_width = max(1.0, float(self._style.stroke_width) * ratio)
         radius = brush_width / 2.0
         color = QColor(self._style.stroke_color)
-        clip_region = None
-        if self.has_pixel_selection():
-            mask = self._active_selection_mask(image.width(), image.height())
-            if mask is not None and mask_has_selection(mask):
-                clip_region = region_from_mask(mask)
 
         paint_soft_brush_segment(
             image,
@@ -2358,13 +2684,21 @@ class EditorCanvas(QGraphicsView):
             color=color,
             hardness=self._brush_hardness,
             erase=self._brush_erase_mode,
-            clip_region=clip_region,
+            clip_region=self._brush_clip_region,
         )
 
-        painted = QPixmap.fromImage(image)
-        painted.setDevicePixelRatio(screenshot.devicePixelRatio())
-        self._background_item.setPixmap(painted)
+        force_preview = (
+            not self._brush_painting
+            or not self._brush_stroke_dirty
+            or not self._brush_pixmap_sync_timer.isValid()
+        )
         self._brush_stroke_dirty = True
+        # Interactive strokes throttle live previews; final sync is forced on finish.
+        self._sync_brush_pixmap(force=force_preview)
+        if not self._brush_painting:
+            # One-shot paints (e.g. tests / programmatic calls) must not keep the buffer.
+            self._brush_paint_image = None
+            self._brush_clip_region = None
 
     def _apply_wand_at(self, scene_pos: QPointF, *, add: bool) -> None:
         """
@@ -2828,22 +3162,8 @@ class EditorCanvas(QGraphicsView):
                 self._paste_image_pixmap(path_pixmap, scene_pos)
                 return
             if text:
-                text_item = self._scene.addText(text)
-                text_item.setDefaultTextColor(self._style.text_color)
-                font = text_item.font()
-                font.setPointSize(self._style.font_size)
-                font.setFamily(self._style.font_family)
-                font.setBold(self._style.font_bold)
-                font.setItalic(self._style.font_italic)
-                font.setUnderline(self._style.font_underline)
-                font.setLetterSpacing(
-                    QFont.SpacingType.AbsoluteSpacing,
-                    self._style.letter_spacing,
-                )
-                text_item.setFont(font)
-                text_item.setPos(scene_pos)
-                text_item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
-                configure_graphics_item(text_item, "text")
+                text_item = self._create_text_item(text, scene_pos)
+                self._select_annotation_item(text_item)
                 self._emit_content_changed("Paste text")
 
     def _try_paste_snappix_clipboard(self, mime) -> bool:
@@ -2940,6 +3260,9 @@ class EditorCanvas(QGraphicsView):
             self.apply_pending_crop()
             return
         if event.key() == Qt.Key.Key_Escape:
+            if self._brush_painting:
+                self._finish_brush_stroke(commit=self._brush_stroke_dirty)
+                return
             if self.has_pending_crop():
                 self.cancel_crop()
                 return
@@ -3050,13 +3373,23 @@ class EditorCanvas(QGraphicsView):
             return True
 
         if annotation_type == "text":
+            if isinstance(item, StyledTextItem):
+                font = QFont(item.font())
+                point_size = font.pointSize()
+                if point_size <= 0:
+                    point_size = 16
+                font.setPointSize(max(1, int(round(point_size * scale_factor))))
+                item.set_font(font)
+                return True
             text_item = item
-            font = text_item.font()
+            font = QFont(text_item.font())
             point_size = font.pointSize()
             if point_size <= 0:
                 point_size = 16
             font.setPointSize(max(1, int(round(point_size * scale_factor))))
             text_item.setFont(font)
+            if isinstance(text_item, QGraphicsTextItem):
+                text_item.document().setDefaultFont(font)
             return True
 
         if annotation_type == "image":
@@ -3912,7 +4245,7 @@ class EditorCanvas(QGraphicsView):
             self._clear_resize_overlay()
             self._alignment_guides.clear()
             self._alignment_labels.clear()
-            self.selection_style_changed.emit({"type": ""})
+            self._refresh_selection_info()
             self.viewport().update()
             return
         item = selected[0]
@@ -3920,7 +4253,7 @@ class EditorCanvas(QGraphicsView):
             self._clear_resize_overlay()
             self._alignment_guides.clear()
             self._alignment_labels.clear()
-            self.selection_style_changed.emit({"type": ""})
+            self._refresh_selection_info()
             self.viewport().update()
             return
         if len(selected) == 1 and self._can_resize_item(item):

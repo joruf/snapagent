@@ -85,10 +85,10 @@ TOOL_HELP_ENTRIES: tuple[ToolHelpEntry, ...] = (
     ToolHelpEntry(
         tool=Tool.BRUSH,
         name="Brush",
-        tooltip_blurb="soft freehand paint; Width + Hardness + Border opacity",
+        tooltip_blurb="soft freehand paint; tool menu: Width + Hard",
         description=(
             "Freehand soft brush on the screenshot using the Border color and opacity. "
-            "Set thickness with Width and edge softness with Hardness. "
+            "Open the Brush tool menu for Width and Hard (edge softness). "
             "If a pixel selection is active, painting stays inside it."
         ),
         shortcut_hint="B",
@@ -96,9 +96,10 @@ TOOL_HELP_ENTRIES: tuple[ToolHelpEntry, ...] = (
     ToolHelpEntry(
         tool=Tool.ERASER,
         name="Eraser",
-        tooltip_blurb="soft freehand erase; Width + Hardness + Border opacity",
+        tooltip_blurb="soft freehand erase; tool menu: Width + Hard",
         description=(
-            "Soft eraser that removes screenshot pixels. Width and Hardness match the Brush. "
+            "Soft eraser that removes screenshot pixels. "
+            "Open the Eraser tool menu for Width and Hard. "
             "Border opacity controls erase strength. Clips to an active pixel selection."
         ),
         shortcut_hint="E",
@@ -115,43 +116,55 @@ TOOL_HELP_ENTRIES: tuple[ToolHelpEntry, ...] = (
     ),
     ToolHelpEntry(
         tool=Tool.EYEDROPPER,
-        name="Eyedropper",
+        name="Color Picker",
         tooltip_blurb="sample document color into Border or Fill",
         description=(
-            "Samples a color from the screenshot into Border or Fill. "
-            "Use the tool menu to choose the target."
+            "Samples a color from the screenshot into Border or Fill "
+            "(pipette / color picker). Use the tool menu to choose the target."
         ),
         shortcut_hint="I",
     ),
     ToolHelpEntry(
         tool=Tool.RECT,
         name="Rectangle",
-        tooltip_blurb="draw a rectangle annotation",
-        description="Draws a rectangle annotation on top of the screenshot.",
+        tooltip_blurb="draw a rectangle; tool menu: Width + Style",
+        description=(
+            "Draws a rectangle annotation on top of the screenshot. "
+            "Open the tool menu for Width and line Style (solid/dash/dot)."
+        ),
     ),
     ToolHelpEntry(
         tool=Tool.ELLIPSE,
         name="Ellipse",
-        tooltip_blurb="draw an ellipse annotation",
-        description="Draws an ellipse or circle annotation on top of the screenshot.",
+        tooltip_blurb="draw an ellipse; tool menu: Width + Style",
+        description=(
+            "Draws an ellipse or circle annotation on top of the screenshot. "
+            "Open the tool menu for Width and line Style (solid/dash/dot)."
+        ),
     ),
     ToolHelpEntry(
         tool=Tool.LINE,
         name="Line",
-        tooltip_blurb="draw a straight line",
-        description="Draws a straight line annotation.",
+        tooltip_blurb="draw a straight line; tool menu: Width + Style",
+        description=(
+            "Draws a straight line annotation. "
+            "Open the tool menu for Width and line Style (solid/dash/dot)."
+        ),
     ),
     ToolHelpEntry(
         tool=Tool.ARROW,
         name="Arrow",
-        tooltip_blurb="draw an arrow",
-        description="Draws an arrow annotation pointing from start to end.",
+        tooltip_blurb="draw an arrow; tool menu: Width + Style",
+        description=(
+            "Draws an arrow annotation pointing from start to end. "
+            "Open the tool menu for Width and line Style (solid/dash/dot)."
+        ),
     ),
     ToolHelpEntry(
         tool=Tool.TEXT,
         name="Text",
         tooltip_blurb="insert a text annotation",
-        description="Inserts a text annotation. Edit content and typography in the Text panel.",
+        description="Inserts a text annotation. Use the Text tool menu for font, size, style, and spacing.",
     ),
     ToolHelpEntry(
         tool=Tool.FILL_BG,

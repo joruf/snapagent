@@ -221,11 +221,30 @@ class TestEditorSelectionInfo(unittest.TestCase):
 
     def test_format_selection_info_empty_when_cleared(self) -> None:
         """
-        Ensures cleared selection produces an empty status summary.
+        Ensures an empty type payload produces an empty status summary.
         """
 
         self.assertEqual(format_selection_info({"type": ""}), "")
         self.assertEqual(format_selection_info({}), "")
+
+    def test_format_document_info_includes_size_and_zoom(self) -> None:
+        """
+        Ensures document payloads render size, zoom, and annotation count.
+        """
+
+        summary = format_selection_info(
+            {
+                "type": "document",
+                "width": 1920.0,
+                "height": 1080.0,
+                "zoom": 125,
+                "annotation_count": 3,
+            }
+        )
+        self.assertIn("Document", summary)
+        self.assertIn("1920×1080 px", summary)
+        self.assertIn("Zoom 125%", summary)
+        self.assertIn("3 annotations", summary)
 
     def test_refresh_selection_info_emits_payload(self) -> None:
         """
@@ -366,9 +385,9 @@ class TestEditorSelectionInfo(unittest.TestCase):
         set_style_mock.assert_not_called()
         self.assertIn("Rectangle", window._selection_info_label.text())  # pylint: disable=protected-access
 
-    def test_clear_selection_clears_footer_label(self) -> None:
+    def test_clear_selection_shows_document_footer(self) -> None:
         """
-        Ensures deselecting all items clears the footer selection label.
+        Ensures deselecting annotations shows document size in the footer.
         """
 
         window = EditorWindow(_solid_pixmap(120, 90))
@@ -388,12 +407,57 @@ class TestEditorSelectionInfo(unittest.TestCase):
         )
         item = _annotation_item(window.canvas, "rect")
         item.setSelected(True)
-        self.assertNotEqual(window._selection_info_label.text(), "")  # pylint: disable=protected-access
+        self.assertIn("Rectangle", window._selection_info_label.text())  # pylint: disable=protected-access
 
         window.canvas.scene().clearSelection()
         window.canvas._refresh_selection_info()  # pylint: disable=protected-access
 
-        self.assertEqual(window._selection_info_label.text(), "")  # pylint: disable=protected-access
+        footer = window._selection_info_label.text()  # pylint: disable=protected-access
+        self.assertIn("Document", footer)
+        self.assertIn("120×90 px", footer)
+        self.assertIn("1 annotation", footer)
+        window.close()
+
+    def test_document_style_change_skips_text_popup_widgets(self) -> None:
+        """
+        Ensures document footer updates do not touch Text-tool menu controls.
+        """
+
+        window = EditorWindow(_solid_pixmap(100, 80))
+        with patch.object(window.text_letter_spacing_spin, "setEnabled") as set_enabled:
+            with patch.object(window.text_style_combo, "setCurrentIndex") as set_index:
+                window._on_selection_style_changed(  # pylint: disable=protected-access
+                    {
+                        "type": "document",
+                        "pixel_width": 100,
+                        "pixel_height": 80,
+                        "zoom": 100,
+                        "annotation_count": 0,
+                    }
+                )
+        set_enabled.assert_not_called()
+        set_index.assert_not_called()
+        self.assertIn("Document", window._selection_info_label.text())  # pylint: disable=protected-access
+        window.close()
+
+    def test_document_payload_emitted_without_selection(self) -> None:
+        """
+        Ensures an empty selection emits document metadata for the footer.
+        """
+
+        canvas = EditorCanvas()
+        canvas.set_screenshot(QPixmap(320, 200))
+        received: list[dict] = []
+        canvas.selection_style_changed.connect(received.append)
+        received.clear()
+        canvas._refresh_selection_info()  # pylint: disable=protected-access
+        self.assertEqual(len(received), 1)
+        payload = received[0]
+        self.assertEqual(payload["type"], "document")
+        self.assertEqual(payload["width"], 320.0)
+        self.assertEqual(payload["height"], 200.0)
+        self.assertEqual(payload["annotation_count"], 0)
+        self.assertIn("Zoom", format_selection_info(payload))
 
     def test_set_style_refreshes_footer_without_recursion(self) -> None:
         """

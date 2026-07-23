@@ -124,6 +124,39 @@ class TestStorage(unittest.TestCase):
             restored_payload = restored.annotations[0].payload
             self.assertTrue(bool(restored_payload.get("image_png_base64")))
             self.assertIsNone(restored_payload.get("image_asset_path"))
+            # Live model payload must stay intact for subsequent autosaves.
+            self.assertTrue(bool(annotation.payload.get("image_png_base64")))
+            self.assertNotIn("image_asset_path", annotation.payload)
+
+    def test_save_project_does_not_mutate_live_image_payload(self) -> None:
+        """
+        Ensures autosave does not clear image bytes on the in-memory model.
+        """
+
+        screenshot = _solid_pixmap(10, 10, QColor(1, 2, 3, 255))
+        embedded_image = _solid_pixmap(4, 4, QColor(9, 8, 7, 255))
+        encoded = pixmap_to_base64_png(embedded_image)
+        annotation = AnnotationModel(
+            annotation_type="image",
+            x=0.0,
+            y=0.0,
+            width=4.0,
+            height=4.0,
+            stroke_rgba=[0, 0, 0, 0],
+            fill_rgba=[0, 0, 0, 0],
+            stroke_width=0.0,
+            payload={"image_png_base64": encoded, "z_index": 1.0},
+        )
+        model = build_project_model(screenshot, [annotation])
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = Path(tmp_dir) / "autosave.sfp"
+            save_project(target, model)
+            save_project(target, model)
+
+        self.assertEqual(annotation.payload.get("image_png_base64"), encoded)
+        self.assertEqual(annotation.payload.get("z_index"), 1.0)
+        self.assertNotIn("image_asset_path", annotation.payload)
 
     def test_save_project_creates_missing_parent_directories(self) -> None:
         """

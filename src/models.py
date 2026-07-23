@@ -72,7 +72,7 @@ class AnnotationModel:
             "font_bold": self.font_bold,
             "font_italic": self.font_italic,
             "font_underline": self.font_underline,
-            "payload": self.payload,
+            "payload": dict(self.payload),
         }
 
     @classmethod

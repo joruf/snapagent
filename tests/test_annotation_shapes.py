@@ -134,9 +134,9 @@ class TestAnnotationShapes(unittest.TestCase):
         )
         self.assertTrue(is_styled_text_annotation(annotation))
 
-    def test_plain_text_is_not_styled(self) -> None:
+    def test_plain_text_with_style_payload_uses_styled_item(self) -> None:
         """
-        Ensures plain text annotations are not treated as styled containers.
+        Ensures plain text that declares text_style restores as StyledTextItem.
         """
 
         annotation = AnnotationModel(
@@ -150,6 +150,25 @@ class TestAnnotationShapes(unittest.TestCase):
             stroke_width=1.0,
             text="Plain",
             payload={"text_style": TEXT_STYLE_PLAIN},
+        )
+        self.assertTrue(is_styled_text_annotation(annotation))
+
+    def test_legacy_text_without_style_payload_stays_graphics_text(self) -> None:
+        """
+        Ensures older text annotations without text_style keep the legacy loader.
+        """
+
+        annotation = AnnotationModel(
+            annotation_type="text",
+            x=0.0,
+            y=0.0,
+            width=40.0,
+            height=20.0,
+            stroke_rgba=[0, 0, 0, 255],
+            fill_rgba=[0, 0, 0, 0],
+            stroke_width=1.0,
+            text="Legacy",
+            payload={},
         )
         self.assertFalse(is_styled_text_annotation(annotation))
 

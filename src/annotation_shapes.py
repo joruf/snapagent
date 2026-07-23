@@ -235,6 +235,36 @@ class StyledTextItem(QGraphicsItem):
         self._rebuild_metrics()
         self.update()
 
+    def set_text_style(self, text_style: str) -> None:
+        """
+        Updates the container style (plain, box, or speech bubble).
+
+        Args:
+            text_style: Target text style identifier.
+
+        Returns:
+            None
+        """
+
+        resolved = str(text_style or TEXT_STYLE_PLAIN).strip().lower()
+        if resolved not in {TEXT_STYLE_PLAIN, TEXT_STYLE_BOX, TEXT_STYLE_BUBBLE}:
+            resolved = TEXT_STYLE_PLAIN
+        if resolved == self._text_style:
+            return
+        self._text_style = resolved
+        self._rebuild_metrics()
+        self.update()
+
+    def font(self) -> QFont:
+        """
+        Returns a copy of the active text font.
+
+        Returns:
+            QFont: Current font.
+        """
+
+        return QFont(self._font)
+
     def set_colors(
         self,
         text_color: QColor | None = None,
@@ -259,6 +289,20 @@ class StyledTextItem(QGraphicsItem):
             self._fill_color = fill_color
         if stroke_color is not None:
             self._stroke_color = stroke_color
+        self.update()
+
+    def set_stroke_width(self, width: float) -> None:
+        """
+        Updates the container border width.
+
+        Args:
+            width: Border thickness in pixels; ``0`` draws no border.
+
+        Returns:
+            None
+        """
+
+        self._stroke_width = max(0.0, float(width))
         self.update()
 
     def set_layout_options(
@@ -372,7 +416,10 @@ class StyledTextItem(QGraphicsItem):
             return
 
         path = self._container_path()
-        painter.setPen(QPen(self._stroke_color, self._stroke_width))
+        if float(self._stroke_width) <= 0.0:
+            painter.setPen(Qt.PenStyle.NoPen)
+        else:
+            painter.setPen(QPen(self._stroke_color, self._stroke_width))
         painter.setBrush(QBrush(self._fill_color))
         painter.drawPath(path)
         painter.setPen(self._text_color)
@@ -526,6 +573,12 @@ def annotation_from_styled_text_item(item: StyledTextItem) -> AnnotationModel:
         font_underline=font.underline(),
         payload={
             "text_style": item.text_style(),
+            "text_rgba": [
+                item._text_color.red(),
+                item._text_color.green(),
+                item._text_color.blue(),
+                item._text_color.alpha(),
+            ],
             "letter_spacing": item.letter_spacing(),
             "line_spacing_factor": item.line_spacing_factor(),
             "box_padding": item.box_padding(),
@@ -573,11 +626,21 @@ def add_styled_text_to_scene(scene: QGraphicsScene, annotation: AnnotationModel)
     font.setItalic(annotation.font_italic)
     font.setUnderline(annotation.font_underline)
     text_style = str(annotation.payload.get("text_style", TEXT_STYLE_PLAIN))
+    text_rgba = annotation.payload.get("text_rgba")
+    if isinstance(text_rgba, list) and len(text_rgba) == 4:
+        text_color = QColor(
+            int(text_rgba[0]),
+            int(text_rgba[1]),
+            int(text_rgba[2]),
+            int(text_rgba[3]),
+        )
+    else:
+        text_color = QColor(*annotation.stroke_rgba)
     item = StyledTextItem(
         text=annotation.text,
         text_style=text_style,
         font=font,
-        text_color=QColor(*annotation.stroke_rgba),
+        text_color=text_color,
         fill_color=QColor(*annotation.fill_rgba),
         stroke_color=QColor(*annotation.stroke_rgba),
         stroke_width=annotation.stroke_width,
@@ -593,14 +656,22 @@ def add_styled_text_to_scene(scene: QGraphicsScene, annotation: AnnotationModel)
 
 def is_styled_text_annotation(annotation: AnnotationModel) -> bool:
     """
-    Indicates whether one text annotation uses a styled container.
+    Indicates whether one text annotation uses the styled text item path.
+
+    Plain, box, and bubble text all restore as ``StyledTextItem`` when the
+    payload declares a text style (including legacy plain payloads that only
+    appear after a live promote). Box/bubble remain the historical trigger;
+    plain payloads without ``text_style`` keep the legacy ``QGraphicsTextItem``
+    loader for backwards compatibility.
 
     Args:
         annotation: Annotation model.
 
     Returns:
-        bool: True for box or speech bubble text.
+        bool: True when the annotation should restore as StyledTextItem.
     """
 
-    text_style = str(annotation.payload.get("text_style", TEXT_STYLE_PLAIN))
-    return text_style in {TEXT_STYLE_BOX, TEXT_STYLE_BUBBLE}
+    text_style = str(annotation.payload.get("text_style", "")).strip().lower()
+    if text_style in {TEXT_STYLE_PLAIN, TEXT_STYLE_BOX, TEXT_STYLE_BUBBLE}:
+        return True
+    return False

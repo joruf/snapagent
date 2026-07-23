@@ -114,6 +114,37 @@ class TestEditorHistory(unittest.TestCase):
         self.assertIsNone(window._one_shot_tool)  # pylint: disable=protected-access
         window.close()
 
+    def test_one_shot_keeps_draw_label_when_canvas_auto_fits(self) -> None:
+        """
+        Ensures auto-fit resize does not replace the draw action used for one-shot.
+        """
+
+        from unittest.mock import patch
+
+        window = EditorWindow(_solid_pixmap(200, 120))
+        window._on_tool_button_clicked(Tool.RECT)  # pylint: disable=protected-access
+        self.assertEqual(window._one_shot_tool, Tool.RECT)  # pylint: disable=protected-access
+        with patch.object(window.canvas, "_fit_document_to_content", return_value=True):
+            window.canvas._emit_content_changed("Draw rectangle")  # pylint: disable=protected-access
+        # If auto-fit overwrote the label with "Resize canvas…", one-shot would not fire.
+        self.assertEqual(window._active_tool, Tool.SELECT)  # pylint: disable=protected-access
+        self.assertIsNone(window._one_shot_tool)  # pylint: disable=protected-access
+        window.close()
+
+    def test_locked_tool_stays_active_after_draw(self) -> None:
+        """
+        Ensures double-click lock keeps the tool after a completed draw.
+        """
+
+        window = EditorWindow(_solid_pixmap(200, 120))
+        window._toggle_tool_lock(Tool.RECT)  # pylint: disable=protected-access
+        self.assertEqual(window._locked_tool, Tool.RECT)  # pylint: disable=protected-access
+        self.assertIsNone(window._one_shot_tool)  # pylint: disable=protected-access
+        window._apply_one_shot_tool_completion("Draw rectangle")  # pylint: disable=protected-access
+        self.assertEqual(window._active_tool, Tool.RECT)  # pylint: disable=protected-access
+        self.assertEqual(window._locked_tool, Tool.RECT)  # pylint: disable=protected-access
+        window.close()
+
     def test_double_click_lock_sets_and_clears_lock_visual(self) -> None:
         """
         Ensures locked drawing tool displays lock marker and toggles off.

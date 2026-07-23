@@ -361,6 +361,9 @@ def create_pen(style: StyleState) -> QPen:
     """
     Creates a pen from current style.
 
+    A stroke width of ``0`` disables the border (``NoPen``). Qt treats a pen
+    width of ``0`` as a cosmetic hairline, so borderless shapes must use NoPen.
+
     Args:
         style: Active style state.
 
@@ -368,8 +371,84 @@ def create_pen(style: StyleState) -> QPen:
         QPen: Configured pen.
     """
 
-    pen = QPen(style.stroke_color, style.stroke_width)
-    pen.setStyle(stroke_style_to_qt(style.stroke_style))
+    return create_stroke_pen(
+        style.stroke_color,
+        style.stroke_width,
+        stroke_style=style.stroke_style,
+    )
+
+
+def create_stroke_pen(
+    color: QColor,
+    width: float,
+    *,
+    stroke_style: str = STROKE_STYLE_SOLID,
+) -> QPen:
+    """
+    Builds a stroke pen, using NoPen when width is zero.
+
+    Args:
+        color: Stroke color retained even when the pen is disabled.
+        width: Stroke thickness in pixels; ``0`` means no border.
+        stroke_style: Named stroke style for visible pens.
+
+    Returns:
+        QPen: Configured pen.
+    """
+
+    if float(width) <= 0.0:
+        pen = QPen(Qt.PenStyle.NoPen)
+        pen.setColor(color)
+        pen.setWidthF(0.0)
+        return pen
+    pen = QPen(color, float(width))
+    pen.setStyle(stroke_style_to_qt(stroke_style))
+    pen.setCosmetic(False)
+    return pen
+
+
+def pen_stroke_width(pen: QPen) -> float:
+    """
+    Returns the logical stroke width for one pen.
+
+    Args:
+        pen: Source pen.
+
+    Returns:
+        float: ``0`` when the pen is disabled, otherwise ``widthF()``.
+    """
+
+    if pen.style() == Qt.PenStyle.NoPen:
+        return 0.0
+    return float(pen.widthF())
+
+
+def apply_stroke_width_to_pen(pen: QPen, width: float, *, stroke_style: str | None = None) -> QPen:
+    """
+    Updates pen width, switching to NoPen when width is zero.
+
+    Args:
+        pen: Pen to update.
+        width: New stroke thickness in pixels.
+        stroke_style: Optional style restored when re-enabling a border.
+
+    Returns:
+        QPen: Updated pen.
+    """
+
+    resolved = float(width)
+    if resolved <= 0.0:
+        color = pen.color()
+        disabled = QPen(Qt.PenStyle.NoPen)
+        disabled.setColor(color)
+        disabled.setWidthF(0.0)
+        return disabled
+    if pen.style() == Qt.PenStyle.NoPen:
+        style_name = stroke_style if stroke_style is not None else STROKE_STYLE_SOLID
+        pen.setStyle(stroke_style_to_qt(style_name))
+    elif stroke_style is not None:
+        pen.setStyle(stroke_style_to_qt(stroke_style))
+    pen.setWidthF(resolved)
     pen.setCosmetic(False)
     return pen
 
@@ -448,7 +527,10 @@ def annotation_from_item(item: QGraphicsItem) -> AnnotationModel | None:
         rect = shape_item.rect().translated(shape_item.pos())
         pen = shape_item.pen()
         brush = shape_item.brush()
-        payload = {"z_index": item.zValue()}
+        payload = {
+            "stroke_style": _stroke_style_from_pen(pen),
+            "z_index": item.zValue(),
+        }
         merge_transform_into_payload(item, payload)
         return AnnotationModel(
             annotation_type=annotation_type,
@@ -458,7 +540,7 @@ def annotation_from_item(item: QGraphicsItem) -> AnnotationModel | None:
             height=rect.height(),
             stroke_rgba=color_to_list(pen.color()),
             fill_rgba=color_to_list(brush.color()),
-            stroke_width=pen.widthF(),
+            stroke_width=pen_stroke_width(pen),
             payload=payload,
         )
 
@@ -479,7 +561,7 @@ def annotation_from_item(item: QGraphicsItem) -> AnnotationModel | None:
             height=line.p2().y() - line.p1().y(),
             stroke_rgba=color_to_list(pen.color()),
             fill_rgba=[0, 0, 0, 0],
-            stroke_width=pen.widthF(),
+            stroke_width=pen_stroke_width(pen),
             payload=payload,
         )
 
@@ -562,7 +644,11 @@ def add_annotation_to_scene(
 
     stroke = list_to_color(annotation.stroke_rgba)
     fill = list_to_color(annotation.fill_rgba)
-    pen = QPen(stroke, annotation.stroke_width)
+    pen = create_stroke_pen(
+        stroke,
+        annotation.stroke_width,
+        stroke_style=str(annotation.payload.get("stroke_style", STROKE_STYLE_SOLID)),
+    )
     rect = QRectF(annotation.x, annotation.y, annotation.width, annotation.height)
 
     if annotation.annotation_type == "step":

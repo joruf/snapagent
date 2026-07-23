@@ -45,7 +45,8 @@ Categories=Graphics;Utility;
 StartupWMClass=snappix
 EOF
 
-cp "$PROJECT_ROOT/assets/snappix.svg" "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/snappix.svg"
+cp "$PROJECT_ROOT/assets/snappix-red.svg" "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/snappix.svg"
+cp "$PROJECT_ROOT/assets/snappix.svg" "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/snappix-editor.svg"
 
 cat > "$STAGING_DIR/DEBIAN/control" <<EOF
 Package: $PKG_NAME

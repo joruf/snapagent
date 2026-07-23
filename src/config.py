@@ -12,6 +12,37 @@ from typing import Any
 from src.theme import DEFAULT_THEME, normalize_theme_name
 from src.shortcuts import normalize_editor_shortcuts
 
+MIN_STROKE_WIDTH = 0
+MAX_STROKE_WIDTH = 64
+DEFAULT_TOOL_STROKE_WIDTHS: dict[str, int] = {
+    "brush": 12,
+    "eraser": 16,
+    "rect": 4,
+    "ellipse": 4,
+    "line": 3,
+    "arrow": 3,
+    "text": 2,
+}
+WIDTH_AWARE_TOOLS = frozenset(DEFAULT_TOOL_STROKE_WIDTHS.keys())
+# Brush/eraser need a visible stamp; vector borders may be fully disabled with 0.
+BRUSH_WIDTH_TOOLS = frozenset({"brush", "eraser"})
+
+DEFAULT_TOOL_BRUSH_HARDNESS: dict[str, int] = {
+    "brush": 80,
+    "eraser": 80,
+}
+HARDNESS_AWARE_TOOLS = frozenset(DEFAULT_TOOL_BRUSH_HARDNESS.keys())
+
+DEFAULT_TOOL_STROKE_STYLES: dict[str, str] = {
+    "rect": "solid",
+    "ellipse": "solid",
+    "line": "solid",
+    "arrow": "solid",
+}
+STYLE_AWARE_TOOLS = frozenset(DEFAULT_TOOL_STROKE_STYLES.keys())
+VALID_STROKE_STYLES = frozenset({"solid", "dash", "dot", "dash_dot"})
+DEFAULT_STROKE_STYLE = "solid"
+
 POST_CAPTURE_EDITOR = "editor"
 POST_CAPTURE_CLIPBOARD = "clipboard"
 POST_CAPTURE_SAVE = "save"
@@ -99,6 +130,153 @@ def default_capture_save_directory() -> str:
     """
 
     return str(Path.home() / "Downloads" / "snappix")
+
+
+def normalize_stroke_width(value: Any, *, fallback: int = 6, minimum: int | None = None) -> int:
+    """
+    Clamps one stroke/brush width to the supported slider range.
+
+    Args:
+        value: Raw width value.
+        fallback: Value used when parsing fails.
+        minimum: Optional lower bound override (e.g. ``1`` for brush tools).
+
+    Returns:
+        int: Width in ``[minimum or MIN_STROKE_WIDTH, MAX_STROKE_WIDTH]``.
+    """
+
+    try:
+        resolved = int(round(float(value)))
+    except (TypeError, ValueError):
+        resolved = int(fallback)
+    lower = MIN_STROKE_WIDTH if minimum is None else int(minimum)
+    lower = max(MIN_STROKE_WIDTH, lower)
+    return max(lower, min(MAX_STROKE_WIDTH, resolved))
+
+
+def normalize_tool_stroke_widths(raw: dict[str, Any] | None) -> dict[str, int]:
+    """
+    Merges persisted per-tool widths with defaults.
+
+    Args:
+        raw: Optional mapping of tool id → width.
+
+    Returns:
+        dict[str, int]: Complete width map for every width-aware tool.
+    """
+
+    normalized = {
+        tool: normalize_stroke_width(
+            width,
+            minimum=1 if tool in BRUSH_WIDTH_TOOLS else 0,
+        )
+        for tool, width in DEFAULT_TOOL_STROKE_WIDTHS.items()
+    }
+    if not isinstance(raw, dict):
+        return normalized
+    for key, value in raw.items():
+        tool = str(key).strip().lower()
+        if tool in WIDTH_AWARE_TOOLS:
+            normalized[tool] = normalize_stroke_width(
+                value,
+                fallback=normalized[tool],
+                minimum=1 if tool in BRUSH_WIDTH_TOOLS else 0,
+            )
+    return normalized
+
+
+def normalize_brush_hardness(value: Any, *, fallback: int = 80) -> int:
+    """
+    Clamps brush/eraser hardness to the inclusive 0–100 range.
+
+    Args:
+        value: Raw hardness percentage.
+        fallback: Value used when parsing fails.
+
+    Returns:
+        int: Hardness in ``[0, 100]``.
+    """
+
+    try:
+        resolved = int(round(float(value)))
+    except (TypeError, ValueError):
+        resolved = int(fallback)
+    return max(0, min(100, resolved))
+
+
+def normalize_tool_brush_hardness(raw: dict[str, Any] | None) -> dict[str, int]:
+    """
+    Merges persisted per-tool hardness values with defaults.
+
+    Args:
+        raw: Optional mapping of tool id → hardness.
+
+    Returns:
+        dict[str, int]: Complete hardness map for brush and eraser.
+    """
+
+    normalized = {
+        tool: normalize_brush_hardness(value)
+        for tool, value in DEFAULT_TOOL_BRUSH_HARDNESS.items()
+    }
+    if not isinstance(raw, dict):
+        return normalized
+    for key, value in raw.items():
+        tool = str(key).strip().lower()
+        if tool in HARDNESS_AWARE_TOOLS:
+            normalized[tool] = normalize_brush_hardness(
+                value,
+                fallback=normalized[tool],
+            )
+    return normalized
+
+
+def normalize_named_stroke_style(value: Any, *, fallback: str = DEFAULT_STROKE_STYLE) -> str:
+    """
+    Returns a supported named stroke style.
+
+    Args:
+        value: Raw style name.
+        fallback: Style used when the value is unsupported.
+
+    Returns:
+        str: One of ``solid``, ``dash``, ``dot``, ``dash_dot``.
+    """
+
+    resolved = str(value or "").strip().lower()
+    if resolved in VALID_STROKE_STYLES:
+        return resolved
+    fallback_resolved = str(fallback or "").strip().lower()
+    if fallback_resolved in VALID_STROKE_STYLES:
+        return fallback_resolved
+    return DEFAULT_STROKE_STYLE
+
+
+def normalize_tool_stroke_styles(raw: dict[str, Any] | None) -> dict[str, str]:
+    """
+    Merges persisted per-tool stroke styles with defaults.
+
+    Args:
+        raw: Optional mapping of tool id → stroke style name.
+
+    Returns:
+        dict[str, str]: Complete style map for style-aware tools.
+    """
+
+    normalized = {
+        tool: normalize_named_stroke_style(value)
+        for tool, value in DEFAULT_TOOL_STROKE_STYLES.items()
+    }
+    if not isinstance(raw, dict):
+        return normalized
+    for key, value in raw.items():
+        tool = str(key).strip().lower()
+        if tool in STYLE_AWARE_TOOLS:
+            normalized[tool] = normalize_named_stroke_style(
+                value,
+                fallback=normalized[tool],
+            )
+    return normalized
 
 
 def sanitize_editor_shortcut_map(
@@ -243,7 +421,7 @@ def normalize_batch_export_profiles(
         formats = [
             str(value).strip().lower()
             for value in list(profile.get("formats", []))
-            if str(value).strip().lower() in {"png", "jpg", "pdf"}
+            if str(value).strip().lower() in {"png", "jpg", "pdf", "svg"}
         ]
         if not formats:
             formats = ["png"]
@@ -288,6 +466,10 @@ class AppConfig:
         batch_export_last_directory: Last used batch export output directory.
         auto_crop_on_shrink: Whether unused canvas margins are cropped automatically.
         editor_shortcuts: Optional overrides for editor keyboard shortcuts.
+        tool_stroke_widths: Default stroke/brush widths per drawing tool (0–64;
+            brush/eraser stay at least 1).
+        tool_brush_hardness: Default brush/eraser hardness per tool (0–100).
+        tool_stroke_styles: Default line/border styles for shape tools.
     """
 
     autostart_enabled: bool = False
@@ -307,6 +489,9 @@ class AppConfig:
     batch_export_last_directory: str = ""
     auto_crop_on_shrink: bool = True
     editor_shortcuts: dict[str, str] = None
+    tool_stroke_widths: dict[str, int] = None
+    tool_brush_hardness: dict[str, int] = None
+    tool_stroke_styles: dict[str, str] = None
 
     def __post_init__(self) -> None:
         """
@@ -326,6 +511,9 @@ class AppConfig:
             self.editor_shortcuts = normalize_editor_shortcuts(
                 sanitize_editor_shortcut_map(self.editor_shortcuts)
             )
+        self.tool_stroke_widths = normalize_tool_stroke_widths(self.tool_stroke_widths)
+        self.tool_brush_hardness = normalize_tool_brush_hardness(self.tool_brush_hardness)
+        self.tool_stroke_styles = normalize_tool_stroke_styles(self.tool_stroke_styles)
         profile_keys = {
             str(profile.get("key", "")).strip().lower()
             for profile in self.batch_export_profiles
@@ -423,6 +611,21 @@ class ConfigManager:
                     else None
                 )
             ),
+            tool_stroke_widths=normalize_tool_stroke_widths(
+                payload.get("tool_stroke_widths")
+                if isinstance(payload.get("tool_stroke_widths"), dict)
+                else None
+            ),
+            tool_brush_hardness=normalize_tool_brush_hardness(
+                payload.get("tool_brush_hardness")
+                if isinstance(payload.get("tool_brush_hardness"), dict)
+                else None
+            ),
+            tool_stroke_styles=normalize_tool_stroke_styles(
+                payload.get("tool_stroke_styles")
+                if isinstance(payload.get("tool_stroke_styles"), dict)
+                else None
+            ),
         )
 
     def save(self, config: AppConfig) -> None:
@@ -463,6 +666,9 @@ class ConfigManager:
             "editor_shortcuts": normalize_editor_shortcuts(
                 sanitize_editor_shortcut_map(config.editor_shortcuts)
             ),
+            "tool_stroke_widths": normalize_tool_stroke_widths(config.tool_stroke_widths),
+            "tool_brush_hardness": normalize_tool_brush_hardness(config.tool_brush_hardness),
+            "tool_stroke_styles": normalize_tool_stroke_styles(config.tool_stroke_styles),
         }
         self.config_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=True),

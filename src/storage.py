@@ -96,7 +96,20 @@ def save_project(path: str | Path, model: ProjectModel) -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Deep-copy annotation payloads so extracting image assets does not mutate
+    # live in-memory models (to_dict keeps payload by reference).
     manifest = model.to_dict()
+    manifest["annotations"] = [
+        {
+            **annotation,
+            "payload": dict(annotation.get("payload", {}))
+            if isinstance(annotation.get("payload"), dict)
+            else {},
+        }
+        if isinstance(annotation, dict)
+        else annotation
+        for annotation in list(manifest.get("annotations", []))
+    ]
     screenshot_data = base64.b64decode(model.screenshot_png_base64.encode("utf-8"))
     manifest["screenshot_png_base64"] = ""
     manifest["screenshot_path"] = "assets/screenshot.png"

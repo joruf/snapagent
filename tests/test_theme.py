@@ -10,6 +10,8 @@ from src.theme import (
     DEFAULT_THEME,
     THEME_DARK,
     THEME_LIGHT,
+    THEME_SEPIA,
+    THEME_SLATE,
     build_application_stylesheet,
     build_editor_accent_stylesheet,
     get_editor_accent_colors,
@@ -61,16 +63,61 @@ class TestThemeHelpers(unittest.TestCase):
         self.assertIn("QComboBox", dark_stylesheet)
         self.assertIn("QTextEdit", light_stylesheet)
 
-    def test_build_editor_accent_stylesheet_uses_red_editor_colors(self) -> None:
+    def test_build_editor_accent_stylesheet_uses_blue_editor_colors(self) -> None:
         """
-        Ensures editor accent overrides use the red logo palette.
+        Ensures editor accent overrides use the blue logo palette.
         """
 
         editor_stylesheet = build_editor_accent_stylesheet(THEME_DARK)
         accent, _hover = get_editor_accent_colors(THEME_DARK)
+        self.assertEqual(accent, "#2f7dd1")
         self.assertIn("#editorHost", editor_stylesheet)
         self.assertIn(accent, editor_stylesheet)
-        self.assertNotIn(get_theme_colors(THEME_DARK).accent, editor_stylesheet)
+
+    def test_slate_and_sepia_themes_are_supported(self) -> None:
+        """
+        Ensures Slate and Sepia resolve to dedicated color palettes.
+        """
+
+        self.assertEqual(normalize_theme_name(THEME_SLATE), THEME_SLATE)
+        self.assertEqual(normalize_theme_name(THEME_SEPIA), THEME_SEPIA)
+        slate = get_theme_colors(THEME_SLATE)
+        sepia = get_theme_colors(THEME_SEPIA)
+        self.assertNotEqual(slate.window_bg, get_theme_colors(THEME_DARK).window_bg)
+        self.assertNotEqual(sepia.window_bg, get_theme_colors(THEME_LIGHT).window_bg)
+        self.assertIn(slate.accent, build_application_stylesheet(THEME_SLATE))
+        self.assertIn(sepia.accent, build_application_stylesheet(THEME_SEPIA))
+        self.assertEqual(get_editor_accent_colors(THEME_SEPIA)[0], "#2563eb")
+        self.assertEqual(get_editor_accent_colors(THEME_SLATE)[0], "#2f7dd1")
+        set_current_theme(THEME_SLATE)
+        self.assertEqual(current_theme_name(), THEME_SLATE)
+        set_current_theme(THEME_DARK)
+
+    def test_build_capture_accent_stylesheet_uses_red_capture_colors(self) -> None:
+        """
+        Ensures capture accent overrides use the red logo palette.
+        """
+
+        from src.theme import (
+            build_capture_accent_stylesheet,
+            get_capture_accent_colors,
+            get_capture_accent_text_color,
+        )
+
+        capture_stylesheet = build_capture_accent_stylesheet(THEME_DARK)
+        accent, _hover = get_capture_accent_colors(THEME_DARK)
+        self.assertEqual(accent, "#b92f2f")
+        self.assertIn("#capturePanel", capture_stylesheet)
+        self.assertIn(accent, capture_stylesheet)
+        self.assertIn("font-weight: 700", capture_stylesheet)
+        self.assertEqual(get_capture_accent_text_color(THEME_DARK), "#ffffff")
+        self.assertIn("#ffffff", capture_stylesheet)
+        light_accent, _light_hover = get_capture_accent_colors(THEME_LIGHT)
+        self.assertEqual(light_accent, "#b42318")
+        self.assertEqual(get_capture_accent_text_color(THEME_LIGHT), "#ffffff")
+        light_stylesheet = build_capture_accent_stylesheet(THEME_LIGHT)
+        self.assertIn(light_accent, light_stylesheet)
+        self.assertIn("#ffffff", light_stylesheet)
 
     def test_dynamic_button_styles_use_theme_border(self) -> None:
         """

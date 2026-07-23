@@ -104,7 +104,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--project", required=True, help="Path to .sfp project")
     export_parser.add_argument(
         "--format",
-        choices=["png", "jpg", "pdf"],
+        choices=["png", "jpg", "pdf", "svg"],
         required=True,
         help="Target export format",
     )
@@ -152,7 +152,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     batch_export_parser.add_argument(
         "--formats",
         nargs="+",
-        choices=["png", "jpg", "pdf"],
+        choices=["png", "jpg", "pdf", "svg"],
         default=["png", "jpg", "pdf"],
         help="Formats to export",
     )
@@ -387,7 +387,7 @@ def _run_export_command(
     Args:
         project_path: Source project file path.
         output_path: Target export file path.
-        fmt: Export format (png/jpg/pdf).
+        fmt: Export format (png/jpg/pdf/svg).
         jpg_quality: JPEG quality value.
         pdf_dpi: PDF DPI value.
         scale: Output scale factor.
@@ -429,6 +429,15 @@ def _run_export_command(
         quality = max(1, min(100, jpg_quality))
         if not pixmap.save(target, "JPG", quality):
             print(f"Export failed: could not write JPG: {target}")
+            return 2
+        print(target)
+        return 0
+    if fmt == "svg":
+        from src.image_export import write_pixmap_as_svg
+
+        target = _resolve_output_path(output_path, "svg")
+        if not write_pixmap_as_svg(pixmap, target):
+            print(f"Export failed: could not write SVG: {target}")
             return 2
         print(target)
         return 0

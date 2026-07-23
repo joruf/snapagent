@@ -51,7 +51,10 @@ from src.constants import ABOUT_GITHUB, APP_FILE_EXTENSION, APP_NAME
 from src.theme import (
     THEME_DARK,
     THEME_LIGHT,
+    THEME_SEPIA,
+    THEME_SLATE,
     build_application_stylesheet,
+    build_capture_accent_stylesheet,
     build_editor_accent_stylesheet,
     normalize_theme_name,
     set_current_theme,
@@ -81,31 +84,42 @@ def _project_root() -> Path:
 _INITIALIZED_FILE = _project_root() / ".initialized"
 
 
-def _icon_path() -> Path:
+def _capture_icon_path() -> Path:
     """
-    Returns the application icon path.
+    Returns the red capture icon path.
 
     Returns:
-        Path: Icon file path.
-    """
-
-    return _project_root() / "assets" / "snappix.svg"
-
-
-def _editor_icon_path() -> Path:
-    """
-    Returns the red editor icon path.
-
-    Returns:
-        Path: Editor icon file path.
+        Path: Capture icon file path.
     """
 
     return _project_root() / "assets" / "snappix-red.svg"
 
 
+def _editor_icon_path() -> Path:
+    """
+    Returns the blue editor icon path.
+
+    Returns:
+        Path: Editor icon file path.
+    """
+
+    return _project_root() / "assets" / "snappix.svg"
+
+
+def _icon_path() -> Path:
+    """
+    Returns the primary application (capture) icon path.
+
+    Returns:
+        Path: Icon file path.
+    """
+
+    return _capture_icon_path()
+
+
 def _build_capture_icon():
     """
-    Builds the blue capture taskbar icon.
+    Builds the red capture taskbar icon.
 
     Returns:
         QIcon: Capture icon with theme fallback.
@@ -113,12 +127,12 @@ def _build_capture_icon():
 
     from PySide6.QtGui import QIcon
 
-    return QIcon.fromTheme("snappix", QIcon(str(_icon_path())))
+    return QIcon.fromTheme("snappix", QIcon(str(_capture_icon_path())))
 
 
 def _build_editor_icon():
     """
-    Builds the red editor taskbar icon.
+    Builds the blue editor taskbar icon.
 
     Returns:
         QIcon: Editor icon with theme fallback.
@@ -166,7 +180,7 @@ def _install_application_icons() -> None:
         Path.home() / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
     )
     icon_root.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(_icon_path(), icon_root / "snappix.svg")
+    shutil.copy2(_capture_icon_path(), icon_root / "snappix.svg")
     shutil.copy2(_editor_icon_path(), icon_root / "snappix-editor.svg")
     _refresh_icon_theme_cache(icon_root.parent.parent)
 
@@ -637,6 +651,20 @@ class AppController:
             )
             self._theme_action_group.addAction(self.theme_light_action)
             theme_menu.addAction(self.theme_light_action)
+            self.theme_slate_action = QAction("Slate", theme_menu)
+            self.theme_slate_action.setCheckable(True)
+            self.theme_slate_action.triggered.connect(
+                lambda: self.set_theme(THEME_SLATE)
+            )
+            self._theme_action_group.addAction(self.theme_slate_action)
+            theme_menu.addAction(self.theme_slate_action)
+            self.theme_sepia_action = QAction("Sepia", theme_menu)
+            self.theme_sepia_action.setCheckable(True)
+            self.theme_sepia_action.triggered.connect(
+                lambda: self.set_theme(THEME_SEPIA)
+            )
+            self._theme_action_group.addAction(self.theme_sepia_action)
+            theme_menu.addAction(self.theme_sepia_action)
             tray_menu.addSeparator()
             settings_action = QAction("Settings...", tray_menu)
             settings_action.triggered.connect(self.show_settings_dialog)
@@ -655,6 +683,8 @@ class AppController:
             self._theme_action_group = None
             self.theme_dark_action = None
             self.theme_light_action = None
+            self.theme_slate_action = None
+            self.theme_sepia_action = None
 
         self.capture_panel.set_minimize_to_tray_on_close(True)
         self.editor_host.set_minimize_to_tray_on_close(True)
@@ -730,6 +760,18 @@ class AppController:
         for editor in list(self.editors):
             editor.set_auto_crop_on_shrink(self.config.auto_crop_on_shrink)
             editor.apply_editor_shortcuts(self.config.editor_shortcuts)
+            editor.apply_tool_stroke_widths(
+                self.config.tool_stroke_widths,
+                emit_signal=False,
+            )
+            editor.apply_tool_brush_hardness(
+                self.config.tool_brush_hardness,
+                emit_signal=False,
+            )
+            editor.apply_tool_stroke_styles(
+                self.config.tool_stroke_styles,
+                emit_signal=False,
+            )
 
     def _capture_save_directory(self) -> Path:
         """
@@ -837,15 +879,32 @@ class AppController:
 
         if not self._tray_available:
             return
-        if self.theme_dark_action is None or self.theme_light_action is None:
+        if (
+            self.theme_dark_action is None
+            or self.theme_light_action is None
+            or self.theme_slate_action is None
+            or self.theme_sepia_action is None
+        ):
             return
         normalized = normalize_theme_name(theme_name)
-        self.theme_dark_action.blockSignals(True)
-        self.theme_light_action.blockSignals(True)
+        for action in (
+            self.theme_dark_action,
+            self.theme_light_action,
+            self.theme_slate_action,
+            self.theme_sepia_action,
+        ):
+            action.blockSignals(True)
         self.theme_dark_action.setChecked(normalized == THEME_DARK)
         self.theme_light_action.setChecked(normalized == THEME_LIGHT)
-        self.theme_dark_action.blockSignals(False)
-        self.theme_light_action.blockSignals(False)
+        self.theme_slate_action.setChecked(normalized == THEME_SLATE)
+        self.theme_sepia_action.setChecked(normalized == THEME_SEPIA)
+        for action in (
+            self.theme_dark_action,
+            self.theme_light_action,
+            self.theme_slate_action,
+            self.theme_sepia_action,
+        ):
+            action.blockSignals(False)
 
     def _sync_editor_theme_actions(self, theme_name: str) -> None:
         """
@@ -880,6 +939,7 @@ class AppController:
         set_current_theme(normalized)
         self.app.setStyleSheet(build_application_stylesheet(normalized))
         self.editor_host.setStyleSheet(build_editor_accent_stylesheet(normalized))
+        self.capture_panel.setStyleSheet(build_capture_accent_stylesheet(normalized))
         self.config.theme = normalized
         if persist:
             self.config_manager.save(self.config)
@@ -961,6 +1021,93 @@ class AppController:
         self.config.export_keep_transparency = resolved
         self.config_manager.save(self.config)
 
+    def _on_editor_tool_stroke_widths_changed(self, widths: object) -> None:
+        """
+        Persists per-tool stroke/brush widths and syncs open editors.
+
+        Args:
+            widths: Mapping of tool id → width.
+
+        Returns:
+            None
+        """
+
+        from src.config import normalize_tool_stroke_widths
+
+        normalized = normalize_tool_stroke_widths(
+            widths if isinstance(widths, dict) else None
+        )
+        if normalized == normalize_tool_stroke_widths(self.config.tool_stroke_widths):
+            return
+        self.config.tool_stroke_widths = normalized
+        self.config_manager.save(self.config)
+        sender = self.sender()
+        for editor in list(self.editors):
+            if editor is sender:
+                continue
+            try:
+                editor.apply_tool_stroke_widths(normalized, emit_signal=False)
+            except RuntimeError:
+                continue
+
+    def _on_editor_tool_brush_hardness_changed(self, hardness: object) -> None:
+        """
+        Persists per-tool brush/eraser hardness and syncs open editors.
+
+        Args:
+            hardness: Mapping of tool id → hardness.
+
+        Returns:
+            None
+        """
+
+        from src.config import normalize_tool_brush_hardness
+
+        normalized = normalize_tool_brush_hardness(
+            hardness if isinstance(hardness, dict) else None
+        )
+        if normalized == normalize_tool_brush_hardness(self.config.tool_brush_hardness):
+            return
+        self.config.tool_brush_hardness = normalized
+        self.config_manager.save(self.config)
+        sender = self.sender()
+        for editor in list(self.editors):
+            if editor is sender:
+                continue
+            try:
+                editor.apply_tool_brush_hardness(normalized, emit_signal=False)
+            except RuntimeError:
+                continue
+
+    def _on_editor_tool_stroke_styles_changed(self, styles: object) -> None:
+        """
+        Persists per-tool stroke styles and syncs open editors.
+
+        Args:
+            styles: Mapping of tool id → stroke style name.
+
+        Returns:
+            None
+        """
+
+        from src.config import normalize_tool_stroke_styles
+
+        normalized = normalize_tool_stroke_styles(
+            styles if isinstance(styles, dict) else None
+        )
+        if normalized == normalize_tool_stroke_styles(self.config.tool_stroke_styles):
+            return
+        self.config.tool_stroke_styles = normalized
+        self.config_manager.save(self.config)
+        sender = self.sender()
+        for editor in list(self.editors):
+            if editor is sender:
+                continue
+            try:
+                editor.apply_tool_stroke_styles(normalized, emit_signal=False)
+            except RuntimeError:
+                continue
+
     def _on_editor_batch_profiles_changed(
         self,
         profiles: object,
@@ -1012,7 +1159,7 @@ class AppController:
 
     def _apply_capture_taskbar_identity(self) -> None:
         """
-        Applies blue capture identity for the taskbar and app icon.
+        Applies red capture identity for the taskbar and app icon.
 
         Returns:
             None
@@ -1032,7 +1179,7 @@ class AppController:
 
     def _apply_editor_taskbar_identity(self) -> None:
         """
-        Applies red editor identity for the taskbar and app icon.
+        Applies blue editor identity for the taskbar and app icon.
 
         Returns:
             None
@@ -1098,6 +1245,18 @@ class AppController:
         editor.set_export_keep_transparency(self.config.export_keep_transparency)
         editor.set_auto_crop_on_shrink(self.config.auto_crop_on_shrink)
         editor.apply_editor_shortcuts(self.config.editor_shortcuts)
+        editor.apply_tool_stroke_widths(
+            self.config.tool_stroke_widths,
+            emit_signal=False,
+        )
+        editor.apply_tool_brush_hardness(
+            self.config.tool_brush_hardness,
+            emit_signal=False,
+        )
+        editor.apply_tool_stroke_styles(
+            self.config.tool_stroke_styles,
+            emit_signal=False,
+        )
         editor.set_batch_export_profiles(
             self.config.batch_export_profiles,
             selected_key=self.config.batch_export_profile_key,
@@ -1113,6 +1272,9 @@ class AppController:
         editor.export_keep_transparency_changed.connect(
             self._on_editor_export_keep_transparency_changed
         )
+        editor.tool_stroke_widths_changed.connect(self._on_editor_tool_stroke_widths_changed)
+        editor.tool_brush_hardness_changed.connect(self._on_editor_tool_brush_hardness_changed)
+        editor.tool_stroke_styles_changed.connect(self._on_editor_tool_stroke_styles_changed)
         editor.batch_export_profiles_changed.connect(
             self._on_editor_batch_profiles_changed
         )

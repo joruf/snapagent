@@ -81,7 +81,17 @@ from src.config import (
     EXPORT_PRESET_LIGHTWEIGHT,
     EXPORT_PRESET_PRINT,
     EXPORT_PRESET_WEB,
+    BRUSH_WIDTH_TOOLS,
+    HARDNESS_AWARE_TOOLS,
+    STYLE_AWARE_TOOLS,
+    WIDTH_AWARE_TOOLS,
+    normalize_brush_hardness,
     normalize_export_preset,
+    normalize_named_stroke_style,
+    normalize_stroke_width,
+    normalize_tool_brush_hardness,
+    normalize_tool_stroke_styles,
+    normalize_tool_stroke_widths,
 )
 from src.annotation_items import (
     STROKE_STYLE_DASH,
@@ -107,6 +117,8 @@ from src.storage import (
 from src.theme import (
     THEME_DARK,
     THEME_LIGHT,
+    THEME_SEPIA,
+    THEME_SLATE,
     color_preview_button_stylesheet,
     get_editor_accent_colors,
     get_theme_colors,
@@ -134,6 +146,7 @@ _SELECTION_TYPE_LABELS: dict[str, str] = {
     "text": "Text",
     "image": "Image",
     "step": "Step",
+    "document": "Document",
 }
 
 _STROKE_STYLE_LABELS: dict[str, str] = {
@@ -167,7 +180,7 @@ def _format_rgba_color(rgba: list[Any]) -> str:
 
 def format_selection_info(payload: dict[str, Any]) -> str:
     """
-    Formats selected annotation details for the editor status bar.
+    Formats selected annotation or document details for the editor status bar.
 
     Args:
         payload: Selection detail payload from the canvas.
@@ -179,6 +192,9 @@ def format_selection_info(payload: dict[str, Any]) -> str:
     annotation_type = str(payload.get("type") or "").strip()
     if not annotation_type:
         return ""
+
+    if annotation_type == "document":
+        return _format_document_info(payload)
 
     parts: list[str] = []
     type_label = _SELECTION_TYPE_LABELS.get(annotation_type, annotation_type.title())
@@ -232,9 +248,12 @@ def format_selection_info(payload: dict[str, Any]) -> str:
             parts.append(f"Text {text_color}")
 
     stroke_width = payload.get("stroke_width")
-    if isinstance(stroke_width, (int, float)) and stroke_width > 0:
+    if isinstance(stroke_width, (int, float)) and stroke_width >= 0:
         width_value = int(stroke_width) if float(stroke_width).is_integer() else round(float(stroke_width), 1)
-        parts.append(f"{width_value}px")
+        if float(width_value) <= 0:
+            parts.append("No border")
+        else:
+            parts.append(f"{width_value}px")
 
     stroke_style = payload.get("stroke_style")
     if isinstance(stroke_style, str) and stroke_style.strip():
@@ -266,6 +285,54 @@ def format_selection_info(payload: dict[str, Any]) -> str:
     return "  ·  ".join(parts)
 
 
+def _format_document_info(payload: dict[str, Any]) -> str:
+    """
+    Formats document/canvas details for the editor status bar.
+
+    Args:
+        payload: Document detail payload from the canvas.
+
+    Returns:
+        str: Human-readable document summary.
+    """
+
+    parts: list[str] = ["Document"]
+    width = payload.get("width")
+    height = payload.get("height")
+    if isinstance(width, (int, float)) and isinstance(height, (int, float)):
+        parts.append(f"{width:g}×{height:g} px")
+
+    pixel_width = payload.get("pixel_width")
+    pixel_height = payload.get("pixel_height")
+    dpr = payload.get("dpr")
+    if (
+        isinstance(pixel_width, int)
+        and isinstance(pixel_height, int)
+        and isinstance(dpr, (int, float))
+        and float(dpr) > 1.01
+        and isinstance(width, (int, float))
+        and isinstance(height, (int, float))
+        and (abs(pixel_width - width) > 0.5 or abs(pixel_height - height) > 0.5)
+    ):
+        parts.append(f"Raster {pixel_width}×{pixel_height}")
+
+    zoom = payload.get("zoom")
+    if isinstance(zoom, (int, float)):
+        parts.append(f"Zoom {int(round(float(zoom)))}%")
+
+    annotation_count = payload.get("annotation_count")
+    if isinstance(annotation_count, int):
+        if annotation_count == 1:
+            parts.append("1 annotation")
+        else:
+            parts.append(f"{annotation_count} annotations")
+
+    if payload.get("blank") is True:
+        parts.append("Blank canvas")
+
+    return "  ·  ".join(parts)
+
+
 class EditorWindow(QMainWindow):
     """
     Hosts the Snappix screenshot editor UI.
@@ -281,6 +348,9 @@ class EditorWindow(QMainWindow):
     export_preset_changed = Signal(str)
     export_scale_changed = Signal(float)
     export_keep_transparency_changed = Signal(bool)
+    tool_stroke_widths_changed = Signal(object)
+    tool_brush_hardness_changed = Signal(object)
+    tool_stroke_styles_changed = Signal(object)
 
     def __init__(self, screenshot: QPixmap) -> None:
         """
@@ -359,6 +429,12 @@ class EditorWindow(QMainWindow):
         self._text_corner_radius = 6.0
         self._shortcut_actions: dict[str, QAction] = {}
         self._editor_shortcut_overrides: dict[str, str] = {}
+        self._tool_stroke_widths: dict[str, int] = normalize_tool_stroke_widths(None)
+        self._tool_brush_hardness: dict[str, int] = normalize_tool_brush_hardness(None)
+        self._tool_stroke_styles: dict[str, str] = normalize_tool_stroke_styles(None)
+        self._tool_width_sliders: dict[str, QSlider] = {}
+        self._tool_hardness_sliders: dict[str, QSlider] = {}
+        self._tool_style_combos: dict[str, QComboBox] = {}
 
         container = QWidget(self)
         self.setCentralWidget(container)
@@ -393,6 +469,7 @@ class EditorWindow(QMainWindow):
         )
         self._push_history_state()
         self._refresh_layer_panel()
+        self._autosave_flushing = False
         self._autosave_timer = self.startTimer(30_000)
 
     def _build_toolbar(self) -> QWidget:
@@ -442,7 +519,7 @@ class EditorWindow(QMainWindow):
             (Tool.BRUSH, "Brush"),
             (Tool.ERASER, "Eraser"),
             (Tool.BUCKET, "Fill"),
-            (Tool.EYEDROPPER, "Eyedropper"),
+            (Tool.EYEDROPPER, "Color Picker"),
             (Tool.RECT, "Rectangle"),
             (Tool.ELLIPSE, "Circle"),
             (Tool.LINE, "Line"),
@@ -458,11 +535,11 @@ class EditorWindow(QMainWindow):
             button.setText(label)
             button.setCheckable(True)
             button.setIcon(self._build_tool_icon(tool_key))
-            button.setIconSize(QSize(22, 22))
+            button.setIconSize(QSize(28, 28))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-            button.setFixedSize(32, 28)
+            button.setFixedSize(38, 34)
             button.setToolTip(label)
-            self._configure_compact_toolbar_height(button, 28)
+            self._configure_compact_toolbar_height(button, 34)
             button.clicked.connect(
                 lambda _checked=False, t=tool_key: self._on_tool_button_clicked(t)
             )
@@ -474,13 +551,15 @@ class EditorWindow(QMainWindow):
             strip_layout.addWidget(button)
         self._tool_buttons[Tool.SELECT].setChecked(True)
         self._setup_pixel_tool_option_menus()
+        self._setup_stroke_width_tool_menus()
+        self._setup_text_tool_option_menu()
 
         strip_layout.addSpacing(4)
         self.tools_help_button = QToolButton()
         self.tools_help_button.setText("?")
         self.tools_help_button.setToolTip("Open the tools reference table.")
-        self.tools_help_button.setFixedSize(32, 28)
-        self._configure_compact_toolbar_height(self.tools_help_button, 28)
+        self.tools_help_button.setFixedSize(38, 34)
+        self._configure_compact_toolbar_height(self.tools_help_button, 34)
         self.tools_help_button.clicked.connect(self.show_tools_reference)
         strip_layout.addWidget(self.tools_help_button)
 
@@ -548,9 +627,8 @@ class EditorWindow(QMainWindow):
             QSizePolicy.Policy.Maximum,
         )
         self._PROPERTY_TAB_STYLE = 0
-        self._PROPERTY_TAB_TEXT = 1
-        self._PROPERTY_TAB_ARRANGE = 2
-        self._PROPERTY_TAB_EXPORT = 3
+        self._PROPERTY_TAB_ARRANGE = 1
+        self._PROPERTY_TAB_EXPORT = 2
 
         style_tab = QWidget()
         style_layout = QHBoxLayout(style_tab)
@@ -618,161 +696,8 @@ class EditorWindow(QMainWindow):
         self._configure_compact_toolbar_height(self.text_alpha_label, 22)
         style_layout.addWidget(self.text_alpha_label)
 
-        style_layout.addSpacing(6)
-        style_layout.addWidget(self._create_toolbar_label("Width"))
-        self.stroke_size_slider = QSlider(Qt.Orientation.Horizontal)
-        self.stroke_size_slider.setRange(1, 64)
-        self.stroke_size_slider.setValue(6)
-        self.stroke_size_slider.setFixedWidth(72)
-        self.stroke_size_slider.setToolTip(
-            "Stroke / brush thickness in pixels (also used by Rectangle, Line, and Brush)."
-        )
-        self.stroke_size_slider.valueChanged.connect(self._stroke_width_changed)
-        self.stroke_size_slider.sliderReleased.connect(self._stroke_width_committed)
-        self._configure_compact_toolbar_height(self.stroke_size_slider, 22)
-        style_layout.addWidget(self.stroke_size_slider)
-        self.stroke_size_label = QLabel("6")
-        self.stroke_size_label.setMinimumWidth(22)
-        self.stroke_size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._configure_compact_toolbar_height(self.stroke_size_label, 22)
-        style_layout.addWidget(self.stroke_size_label)
-        style_layout.addWidget(self._create_toolbar_label("Hard"))
-        self.brush_hardness_slider = QSlider(Qt.Orientation.Horizontal)
-        self.brush_hardness_slider.setRange(0, 100)
-        self.brush_hardness_slider.setValue(int(self.canvas.brush_hardness()))
-        self.brush_hardness_slider.setFixedWidth(64)
-        self.brush_hardness_slider.setToolTip(
-            "Brush / eraser hardness (0 = soft edge, 100 = hard edge)."
-        )
-        self.brush_hardness_slider.valueChanged.connect(self._brush_hardness_changed)
-        self.brush_hardness_slider.sliderReleased.connect(self._brush_hardness_committed)
-        self._configure_compact_toolbar_height(self.brush_hardness_slider, 22)
-        style_layout.addWidget(self.brush_hardness_slider)
-        self.brush_hardness_label = QLabel(f"{int(self.canvas.brush_hardness())}%")
-        self.brush_hardness_label.setMinimumWidth(34)
-        self.brush_hardness_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._configure_compact_toolbar_height(self.brush_hardness_label, 22)
-        style_layout.addWidget(self.brush_hardness_label)
-        style_layout.addWidget(self._create_toolbar_label("Line"))
-        self.stroke_style_combo = QComboBox()
-        self.stroke_style_combo.addItem("Solid", STROKE_STYLE_SOLID)
-        self.stroke_style_combo.addItem("Dash", STROKE_STYLE_DASH)
-        self.stroke_style_combo.addItem("Dot", STROKE_STYLE_DOT)
-        self.stroke_style_combo.addItem("Dash dot", STROKE_STYLE_DASH_DOT)
-        self.stroke_style_combo.currentIndexChanged.connect(self._stroke_style_changed)
-        self._configure_compact_toolbar_height(self.stroke_style_combo)
-        style_layout.addWidget(self.stroke_style_combo)
         style_layout.addStretch(1)
         self._property_tabs.addTab(style_tab, "Style")
-
-        text_tab = QWidget()
-        text_layout = QHBoxLayout(text_tab)
-        text_layout.setContentsMargins(4, 0, 4, 0)
-        text_layout.setSpacing(3)
-        text_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        text_layout.addWidget(self._create_toolbar_label("Font"))
-        self.font_family_combo = QComboBox()
-        self.font_family_combo.addItems(sorted(QFontDatabase.families()))
-        self.font_family_combo.currentTextChanged.connect(self._font_family_changed)
-        self._configure_compact_combo(self.font_family_combo, 120)
-        text_layout.addWidget(self.font_family_combo)
-        text_layout.addWidget(self._create_toolbar_label("Size"))
-        self.font_size_combo = QComboBox()
-        self.font_size_combo.addItems(
-            [
-                "8",
-                "9",
-                "10",
-                "11",
-                "12",
-                "14",
-                "16",
-                "18",
-                "20",
-                "24",
-                "28",
-                "32",
-                "40",
-                "48",
-                "56",
-                "64",
-                "72",
-                "96",
-                "120",
-            ]
-        )
-        self.font_size_combo.setCurrentText("16")
-        self.font_size_combo.currentTextChanged.connect(self._font_size_changed)
-        self._configure_compact_combo(self.font_size_combo, 46)
-        text_layout.addWidget(self.font_size_combo)
-        text_layout.addWidget(self._create_toolbar_label("Style"))
-        self.text_style_combo = QComboBox()
-        self.text_style_combo.addItem("Plain", TEXT_STYLE_PLAIN)
-        self.text_style_combo.addItem("Box", TEXT_STYLE_BOX)
-        self.text_style_combo.addItem("Bubble", TEXT_STYLE_BUBBLE)
-        self.text_style_combo.currentIndexChanged.connect(self._text_style_changed)
-        self._configure_compact_combo(self.text_style_combo, 78)
-        text_layout.addWidget(self.text_style_combo)
-        self.text_bold_button = QToolButton()
-        self.text_bold_button.setText("B")
-        self.text_bold_button.setCheckable(True)
-        self.text_bold_button.clicked.connect(self._text_bold_toggled)
-        self._configure_compact_icon_button(self.text_bold_button)
-        text_layout.addWidget(self.text_bold_button)
-        self.text_italic_button = QToolButton()
-        self.text_italic_button.setText("I")
-        self.text_italic_button.setCheckable(True)
-        self.text_italic_button.clicked.connect(self._text_italic_toggled)
-        self._configure_compact_icon_button(self.text_italic_button)
-        text_layout.addWidget(self.text_italic_button)
-        self.text_underline_button = QToolButton()
-        self.text_underline_button.setText("U")
-        self.text_underline_button.setCheckable(True)
-        self.text_underline_button.clicked.connect(self._text_underline_toggled)
-        self._configure_compact_icon_button(self.text_underline_button)
-        text_layout.addWidget(self.text_underline_button)
-        text_layout.addWidget(self._create_toolbar_label("Letter"))
-        self.text_letter_spacing_spin = QDoubleSpinBox()
-        self.text_letter_spacing_spin.setDecimals(1)
-        self.text_letter_spacing_spin.setSingleStep(0.2)
-        self.text_letter_spacing_spin.setRange(-4.0, 20.0)
-        self.text_letter_spacing_spin.setValue(self._text_letter_spacing)
-        self.text_letter_spacing_spin.valueChanged.connect(self._text_letter_spacing_changed)
-        self._configure_compact_combo(self.text_letter_spacing_spin, 56)
-        self.text_letter_spacing_spin.setEnabled(False)
-        text_layout.addWidget(self.text_letter_spacing_spin)
-        text_layout.addWidget(self._create_toolbar_label("Line"))
-        self.text_line_spacing_spin = QDoubleSpinBox()
-        self.text_line_spacing_spin.setDecimals(2)
-        self.text_line_spacing_spin.setSingleStep(0.05)
-        self.text_line_spacing_spin.setRange(0.7, 3.0)
-        self.text_line_spacing_spin.setValue(self._text_line_spacing)
-        self.text_line_spacing_spin.valueChanged.connect(self._text_line_spacing_changed)
-        self._configure_compact_combo(self.text_line_spacing_spin, 56)
-        self.text_line_spacing_spin.setEnabled(False)
-        text_layout.addWidget(self.text_line_spacing_spin)
-        text_layout.addWidget(self._create_toolbar_label("Pad"))
-        self.text_padding_spin = QDoubleSpinBox()
-        self.text_padding_spin.setDecimals(1)
-        self.text_padding_spin.setSingleStep(1.0)
-        self.text_padding_spin.setRange(0.0, 80.0)
-        self.text_padding_spin.setValue(self._text_box_padding)
-        self.text_padding_spin.valueChanged.connect(self._text_padding_changed)
-        self._configure_compact_combo(self.text_padding_spin, 56)
-        self.text_padding_spin.setEnabled(False)
-        text_layout.addWidget(self.text_padding_spin)
-        text_layout.addWidget(self._create_toolbar_label("Radius"))
-        self.text_radius_spin = QDoubleSpinBox()
-        self.text_radius_spin.setDecimals(1)
-        self.text_radius_spin.setSingleStep(1.0)
-        self.text_radius_spin.setRange(0.0, 80.0)
-        self.text_radius_spin.setValue(self._text_corner_radius)
-        self.text_radius_spin.valueChanged.connect(self._text_radius_changed)
-        self._configure_compact_combo(self.text_radius_spin, 56)
-        self.text_radius_spin.setEnabled(False)
-        text_layout.addWidget(self.text_radius_spin)
-        text_layout.addStretch(1)
-        self._property_tabs.addTab(text_tab, "Text")
 
         arrange_tab = QWidget()
         arrange_layout = QHBoxLayout(arrange_tab)
@@ -1032,8 +957,11 @@ class EditorWindow(QMainWindow):
             return
         resolved_type = str(selection_type or "").strip().lower()
         resolved_tool = str(tool or self._active_tool)
+        if resolved_type == "document":
+            return
         if resolved_type == "text" or resolved_tool == Tool.TEXT:
-            self._property_tabs.setCurrentIndex(self._PROPERTY_TAB_TEXT)
+            # Text typography lives on the Text tool popup; colors stay on Style.
+            self._property_tabs.setCurrentIndex(self._PROPERTY_TAB_STYLE)
             return
         if resolved_tool in {
             Tool.RECT,
@@ -1067,7 +995,7 @@ class EditorWindow(QMainWindow):
             QIcon: Rendered icon.
         """
 
-        size = 22
+        size = 28
         scale = size / 18.0
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.GlobalColor.transparent)
@@ -1304,6 +1232,29 @@ class EditorWindow(QMainWindow):
         button.setFixedSize(24, 24)
         button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
+    def _configure_menu_tool_button(self, button: QToolButton) -> None:
+        """
+        Configures a tool strip button that shows a dropdown menu arrow.
+
+        Marks the button for stylesheet icon padding so the glyph sits in the
+        left content area instead of being centered over the menu strip.
+
+        Args:
+            button: Tool button that already has a menu attached.
+
+        Returns:
+            None
+        """
+
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        button.setFixedSize(50, 34)
+        button.setProperty("menuTool", True)
+        style = button.style()
+        if style is not None:
+            style.unpolish(button)
+            style.polish(button)
+        button.update()
+
     def _configure_compact_action_button(self, button: QPushButton) -> None:
         """
         Applies minimum necessary width to one compact action button.
@@ -1368,10 +1319,6 @@ class EditorWindow(QMainWindow):
         for tool_key, button in self._tool_buttons.items():
             button.setToolTip(self._tool_tooltip_text(tool_key))
 
-        self.stroke_size_slider.setToolTip(
-            "Stroke / brush thickness in pixels (also used by Rectangle, Line, and Brush)."
-        )
-        self.stroke_style_combo.setToolTip("Select line style for lines and arrows.")
         self.text_style_combo.setToolTip("Select plain text, text box, or speech bubble.")
         self.stroke_button.setToolTip("Open border color picker.")
         self.fill_button.setToolTip("Open background color picker.")
@@ -1480,6 +1427,13 @@ class EditorWindow(QMainWindow):
         export_pdf.setToolTip("Export the composited image as PDF.")
         export_pdf.triggered.connect(self.export_pdf)
         file_menu.addAction(export_pdf)
+
+        export_svg = QAction("Export as SVG...", self)
+        export_svg.setToolTip(
+            "Export the composited image as a standard SVG (raster embedded)."
+        )
+        export_svg.triggered.connect(self.export_svg)
+        file_menu.addAction(export_svg)
 
         export_batch = QAction("Batch Export...", self)
         export_batch.setToolTip("Export current tab to multiple formats at once.")
@@ -1604,6 +1558,22 @@ class EditorWindow(QMainWindow):
         )
         self._theme_action_group.addAction(self.theme_light_action)
         theme_menu.addAction(self.theme_light_action)
+        self.theme_slate_action = QAction("Slate", self)
+        self.theme_slate_action.setCheckable(True)
+        self.theme_slate_action.setToolTip("Use the cool slate application theme.")
+        self.theme_slate_action.triggered.connect(
+            lambda: self.theme_changed.emit(THEME_SLATE)
+        )
+        self._theme_action_group.addAction(self.theme_slate_action)
+        theme_menu.addAction(self.theme_slate_action)
+        self.theme_sepia_action = QAction("Sepia", self)
+        self.theme_sepia_action.setCheckable(True)
+        self.theme_sepia_action.setToolTip("Use the warm sepia application theme.")
+        self.theme_sepia_action.triggered.connect(
+            lambda: self.theme_changed.emit(THEME_SEPIA)
+        )
+        self._theme_action_group.addAction(self.theme_sepia_action)
+        theme_menu.addAction(self.theme_sepia_action)
 
         view_menu.addSeparator()
         zoom_in_action = QAction("Zoom In", self)
@@ -1762,8 +1732,7 @@ class EditorWindow(QMainWindow):
         for tool_key in selection_tools:
             button = self._tool_buttons[tool_key]
             button.setMenu(erase_menu)
-            button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-            button.setFixedSize(40, 28)
+            self._configure_menu_tool_button(button)
 
         wand_menu = QMenu(self)
         tolerance_action = QWidgetAction(wand_menu)
@@ -1798,8 +1767,7 @@ class EditorWindow(QMainWindow):
         wand_menu.addAction(self.erase_fill_action)
         wand_button = self._tool_buttons[Tool.MAGIC_WAND]
         wand_button.setMenu(wand_menu)
-        wand_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        wand_button.setFixedSize(40, 28)
+        self._configure_menu_tool_button(wand_button)
 
         eyedropper_menu = QMenu(self)
         self.eyedropper_stroke_action = QAction("Sample → Border", self)
@@ -1821,10 +1789,354 @@ class EditorWindow(QMainWindow):
         eyedropper_menu.addAction(self.eyedropper_fill_action)
         eyedropper_button = self._tool_buttons[Tool.EYEDROPPER]
         eyedropper_button.setMenu(eyedropper_menu)
-        eyedropper_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        eyedropper_button.setFixedSize(40, 28)
+        self._configure_menu_tool_button(eyedropper_button)
 
         self._setup_blur_tool_option_menu()
+
+    def _setup_stroke_width_tool_menus(self) -> None:
+        """
+        Attaches Width / Harden / Style popup menus to drawing tools.
+
+        Returns:
+            None
+        """
+
+        width_tools = (
+            Tool.BRUSH,
+            Tool.ERASER,
+            Tool.RECT,
+            Tool.ELLIPSE,
+            Tool.LINE,
+            Tool.ARROW,
+        )
+        for tool_key in width_tools:
+            button = self._tool_buttons.get(tool_key)
+            if button is None:
+                continue
+            menu = QMenu(self)
+            panel_action = QWidgetAction(menu)
+            panel = QWidget(menu)
+            root = QVBoxLayout(panel)
+            root.setContentsMargins(10, 8, 10, 8)
+            root.setSpacing(6)
+
+            width_row = QHBoxLayout()
+            width_row.setSpacing(8)
+            width_title = QLabel("Width", panel)
+            width_title.setMinimumWidth(44)
+            width_title.setToolTip(
+                "Default stroke thickness for new draws with this tool "
+                "(0 = no border for shapes). Selected elements keep their own width "
+                "unless you change Width while they are selected."
+            )
+            width_row.addWidget(width_title)
+            slider = QSlider(Qt.Orientation.Horizontal, panel)
+            minimum = 1 if tool_key in BRUSH_WIDTH_TOOLS else 0
+            slider.setRange(minimum, 64)
+            slider.setValue(self._tool_stroke_widths.get(tool_key, 6))
+            slider.setMinimumWidth(120)
+            slider.setProperty("widthTool", tool_key)
+            slider.valueChanged.connect(self._tool_menu_width_changed)
+            width_row.addWidget(slider, 1)
+            value_label = QLabel(str(slider.value()), panel)
+            value_label.setMinimumWidth(28)
+            value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            slider.valueChanged.connect(
+                lambda value, label=value_label: label.setText(str(int(value)))
+            )
+            width_row.addWidget(value_label)
+            root.addLayout(width_row)
+            self._tool_width_sliders[tool_key] = slider
+
+            if tool_key in HARDNESS_AWARE_TOOLS:
+                hard_row = QHBoxLayout()
+                hard_row.setSpacing(8)
+                hard_title = QLabel("Hard", panel)
+                hard_title.setMinimumWidth(44)
+                hard_title.setToolTip(
+                    "Brush / eraser edge hardness for this tool "
+                    "(0 = soft edge, 100 = hard edge)."
+                )
+                hard_row.addWidget(hard_title)
+                hard_slider = QSlider(Qt.Orientation.Horizontal, panel)
+                hard_slider.setRange(0, 100)
+                hard_slider.setValue(self._tool_brush_hardness.get(tool_key, 80))
+                hard_slider.setMinimumWidth(120)
+                hard_slider.setProperty("hardnessTool", tool_key)
+                hard_slider.valueChanged.connect(self._tool_menu_hardness_changed)
+                hard_row.addWidget(hard_slider, 1)
+                hard_label = QLabel(f"{hard_slider.value()}%", panel)
+                hard_label.setMinimumWidth(36)
+                hard_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                hard_slider.valueChanged.connect(
+                    lambda value, label=hard_label: label.setText(f"{int(value)}%")
+                )
+                hard_row.addWidget(hard_label)
+                root.addLayout(hard_row)
+                self._tool_hardness_sliders[tool_key] = hard_slider
+
+            if tool_key in STYLE_AWARE_TOOLS:
+                style_row = QHBoxLayout()
+                style_row.setSpacing(8)
+                style_title = QLabel("Style", panel)
+                style_title.setMinimumWidth(44)
+                style_title.setToolTip(
+                    "Default line/border style for new draws with this tool. "
+                    "Selected lines/shapes update when changed while selected."
+                )
+                style_row.addWidget(style_title)
+                style_combo = QComboBox(panel)
+                style_combo.addItem("Solid", STROKE_STYLE_SOLID)
+                style_combo.addItem("Dash", STROKE_STYLE_DASH)
+                style_combo.addItem("Dot", STROKE_STYLE_DOT)
+                style_combo.addItem("Dash dot", STROKE_STYLE_DASH_DOT)
+                current_style = self._tool_stroke_styles.get(tool_key, STROKE_STYLE_SOLID)
+                style_index = style_combo.findData(current_style)
+                if style_index >= 0:
+                    style_combo.setCurrentIndex(style_index)
+                style_combo.setProperty("styleTool", tool_key)
+                style_combo.setMinimumWidth(120)
+                style_combo.currentIndexChanged.connect(self._tool_menu_style_changed)
+                style_row.addWidget(style_combo, 1)
+                root.addLayout(style_row)
+                self._tool_style_combos[tool_key] = style_combo
+
+            panel_action.setDefaultWidget(panel)
+            menu.addAction(panel_action)
+            button.setMenu(menu)
+            self._configure_menu_tool_button(button)
+
+    def _tool_menu_width_changed(self, value: int) -> None:
+        """
+        Applies a width change from a tool popup slider.
+
+        Args:
+            value: New width.
+
+        Returns:
+            None
+        """
+
+        sender = self.sender()
+        tool = ""
+        if isinstance(sender, QSlider):
+            tool = str(sender.property("widthTool") or "")
+        self._apply_tool_stroke_width(
+            value,
+            tool=tool or None,
+            persist=True,
+        )
+
+    def _tool_menu_hardness_changed(self, value: int) -> None:
+        """
+        Applies a hardness change from a Brush/Eraser popup slider.
+
+        Args:
+            value: New hardness percentage.
+
+        Returns:
+            None
+        """
+
+        sender = self.sender()
+        tool = ""
+        if isinstance(sender, QSlider):
+            tool = str(sender.property("hardnessTool") or "")
+        self._apply_tool_brush_hardness(
+            value,
+            tool=tool or None,
+            persist=True,
+        )
+
+    def _tool_menu_style_changed(self, _index: int) -> None:
+        """
+        Applies a stroke-style change from a shape-tool popup combo.
+
+        Args:
+            _index: Selected combo index.
+
+        Returns:
+            None
+        """
+
+        sender = self.sender()
+        tool = ""
+        style = ""
+        if isinstance(sender, QComboBox):
+            tool = str(sender.property("styleTool") or "")
+            data = sender.currentData()
+            if isinstance(data, str):
+                style = data
+        if not style:
+            return
+        self._apply_tool_stroke_style(
+            style,
+            tool=tool or None,
+            persist=True,
+        )
+
+    def _setup_text_tool_option_menu(self) -> None:
+        """
+        Attaches typography and text-container options to the Text tool popup.
+
+        Returns:
+            None
+        """
+
+        button = self._tool_buttons.get(Tool.TEXT)
+        if button is None:
+            return
+
+        menu = QMenu(self)
+        panel_action = QWidgetAction(menu)
+        panel = QWidget(menu)
+        root = QVBoxLayout(panel)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(6)
+
+        def add_row(label_text: str, widget: QWidget) -> None:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            label = QLabel(label_text, panel)
+            label.setMinimumWidth(52)
+            row.addWidget(label)
+            row.addWidget(widget, 1)
+            root.addLayout(row)
+
+        self.font_family_combo = QComboBox(panel)
+        self.font_family_combo.addItems(sorted(QFontDatabase.families()))
+        self.font_family_combo.currentTextChanged.connect(self._font_family_changed)
+        self.font_family_combo.setMinimumWidth(180)
+        add_row("Font", self.font_family_combo)
+
+        self.font_size_combo = QComboBox(panel)
+        self.font_size_combo.addItems(
+            [
+                "8",
+                "9",
+                "10",
+                "11",
+                "12",
+                "14",
+                "16",
+                "18",
+                "20",
+                "24",
+                "28",
+                "32",
+                "40",
+                "48",
+                "56",
+                "64",
+                "72",
+                "96",
+                "120",
+            ]
+        )
+        self.font_size_combo.setCurrentText("16")
+        self.font_size_combo.currentTextChanged.connect(self._font_size_changed)
+        self.font_size_combo.setMinimumWidth(72)
+        add_row("Size", self.font_size_combo)
+
+        self.text_style_combo = QComboBox(panel)
+        self.text_style_combo.addItem("Plain", TEXT_STYLE_PLAIN)
+        self.text_style_combo.addItem("Box", TEXT_STYLE_BOX)
+        self.text_style_combo.addItem("Bubble", TEXT_STYLE_BUBBLE)
+        self.text_style_combo.currentIndexChanged.connect(self._text_style_changed)
+        add_row("Style", self.text_style_combo)
+
+        style_row = QHBoxLayout()
+        style_row.setSpacing(6)
+        style_row.addWidget(QLabel("Format", panel))
+        self.text_bold_button = QToolButton(panel)
+        self.text_bold_button.setText("B")
+        self.text_bold_button.setCheckable(True)
+        self.text_bold_button.clicked.connect(self._text_bold_toggled)
+        self._configure_compact_icon_button(self.text_bold_button)
+        style_row.addWidget(self.text_bold_button)
+        self.text_italic_button = QToolButton(panel)
+        self.text_italic_button.setText("I")
+        self.text_italic_button.setCheckable(True)
+        self.text_italic_button.clicked.connect(self._text_italic_toggled)
+        self._configure_compact_icon_button(self.text_italic_button)
+        style_row.addWidget(self.text_italic_button)
+        self.text_underline_button = QToolButton(panel)
+        self.text_underline_button.setText("U")
+        self.text_underline_button.setCheckable(True)
+        self.text_underline_button.clicked.connect(self._text_underline_toggled)
+        self._configure_compact_icon_button(self.text_underline_button)
+        style_row.addWidget(self.text_underline_button)
+        style_row.addStretch(1)
+        root.addLayout(style_row)
+
+        self.text_letter_spacing_spin = QDoubleSpinBox(panel)
+        self.text_letter_spacing_spin.setDecimals(1)
+        self.text_letter_spacing_spin.setSingleStep(0.2)
+        self.text_letter_spacing_spin.setRange(-4.0, 20.0)
+        self.text_letter_spacing_spin.setValue(self._text_letter_spacing)
+        self.text_letter_spacing_spin.valueChanged.connect(self._text_letter_spacing_changed)
+        self.text_letter_spacing_spin.setEnabled(False)
+        add_row("Letter", self.text_letter_spacing_spin)
+
+        self.text_line_spacing_spin = QDoubleSpinBox(panel)
+        self.text_line_spacing_spin.setDecimals(2)
+        self.text_line_spacing_spin.setSingleStep(0.05)
+        self.text_line_spacing_spin.setRange(0.7, 3.0)
+        self.text_line_spacing_spin.setValue(self._text_line_spacing)
+        self.text_line_spacing_spin.valueChanged.connect(self._text_line_spacing_changed)
+        self.text_line_spacing_spin.setEnabled(False)
+        add_row("Line", self.text_line_spacing_spin)
+
+        self.text_padding_spin = QDoubleSpinBox(panel)
+        self.text_padding_spin.setDecimals(1)
+        self.text_padding_spin.setSingleStep(1.0)
+        self.text_padding_spin.setRange(0.0, 80.0)
+        self.text_padding_spin.setValue(self._text_box_padding)
+        self.text_padding_spin.valueChanged.connect(self._text_padding_changed)
+        self.text_padding_spin.setEnabled(False)
+        add_row("Pad", self.text_padding_spin)
+
+        self.text_radius_spin = QDoubleSpinBox(panel)
+        self.text_radius_spin.setDecimals(1)
+        self.text_radius_spin.setSingleStep(1.0)
+        self.text_radius_spin.setRange(0.0, 80.0)
+        self.text_radius_spin.setValue(self._text_corner_radius)
+        self.text_radius_spin.valueChanged.connect(self._text_radius_changed)
+        self.text_radius_spin.setEnabled(False)
+        add_row("Radius", self.text_radius_spin)
+
+        width_row = QHBoxLayout()
+        width_row.setSpacing(8)
+        width_title = QLabel("Width", panel)
+        width_title.setMinimumWidth(52)
+        width_title.setToolTip(
+            "Border thickness for boxed/bubble text (0 = no border). "
+            "Selected text keeps its own width unless Width is changed while selected."
+        )
+        width_row.addWidget(width_title)
+        self.text_width_menu_slider = QSlider(Qt.Orientation.Horizontal, panel)
+        self.text_width_menu_slider.setRange(0, 64)
+        self.text_width_menu_slider.setValue(self._tool_stroke_widths.get(Tool.TEXT, 6))
+        self.text_width_menu_slider.setMinimumWidth(120)
+        self.text_width_menu_slider.setProperty("widthTool", Tool.TEXT)
+        self.text_width_menu_slider.valueChanged.connect(self._tool_menu_width_changed)
+        width_row.addWidget(self.text_width_menu_slider, 1)
+        self.text_width_menu_label = QLabel(
+            str(self.text_width_menu_slider.value()),
+            panel,
+        )
+        self.text_width_menu_label.setMinimumWidth(28)
+        self.text_width_menu_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.text_width_menu_slider.valueChanged.connect(
+            lambda value: self.text_width_menu_label.setText(str(int(value)))
+        )
+        width_row.addWidget(self.text_width_menu_label)
+        root.addLayout(width_row)
+
+        panel_action.setDefaultWidget(panel)
+        menu.addAction(panel_action)
+        button.setMenu(menu)
+        self._configure_menu_tool_button(button)
 
     def _setup_blur_tool_option_menu(self) -> None:
         """
@@ -1863,8 +2175,7 @@ class EditorWindow(QMainWindow):
 
         blur_button = self._tool_buttons[Tool.BLUR]
         blur_button.setMenu(blur_menu)
-        blur_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        blur_button.setFixedSize(40, 28)
+        self._configure_menu_tool_button(blur_button)
 
     def _popup_pixel_tool_options(self, tool: str) -> None:
         """
@@ -1889,6 +2200,9 @@ class EditorWindow(QMainWindow):
         """
         Sets active tool and updates button selection state.
 
+        Tool default widths are restored into the active draw style used for
+        newly drawn items. Selected annotation widths stay unchanged.
+
         Args:
             tool: Tool identifier.
 
@@ -1900,8 +2214,278 @@ class EditorWindow(QMainWindow):
         for key, button in self._tool_buttons.items():
             button.setChecked(key == tool)
         self.canvas.set_tool(tool)
+        if tool in WIDTH_AWARE_TOOLS:
+            minimum = 1 if tool in BRUSH_WIDTH_TOOLS else 0
+            resolved = normalize_stroke_width(
+                self._tool_stroke_widths.get(tool, 6),
+                minimum=minimum,
+            )
+            self.canvas.set_style(
+                stroke_width=float(resolved),
+                emit_history=False,
+                apply_to_selection=False,
+                update_active_style=True,
+            )
+        if tool in HARDNESS_AWARE_TOOLS:
+            self.canvas.set_brush_hardness(
+                float(self._tool_brush_hardness.get(tool, 80))
+            )
+        if tool in STYLE_AWARE_TOOLS:
+            self.canvas.set_style(
+                stroke_style=self._tool_stroke_styles.get(tool, STROKE_STYLE_SOLID),
+                emit_history=False,
+                apply_to_selection=False,
+                update_active_style=True,
+            )
         self._focus_property_tab_for_context(tool=tool)
         self.statusBar().showMessage(f"Tool: {tool}")
+
+    def apply_tool_stroke_widths(
+        self,
+        widths: dict[str, int] | None,
+        *,
+        emit_signal: bool = False,
+    ) -> None:
+        """
+        Restores persisted per-tool stroke widths.
+
+        Args:
+            widths: Tool id → width mapping.
+            emit_signal: When True, notifies the host to persist again.
+
+        Returns:
+            None
+        """
+
+        self._tool_stroke_widths = normalize_tool_stroke_widths(widths)
+        for tool_key, slider in self._tool_width_sliders.items():
+            resolved = self._tool_stroke_widths.get(tool_key, 6)
+            if slider.value() != resolved:
+                slider.blockSignals(True)
+                slider.setValue(resolved)
+                slider.blockSignals(False)
+        if hasattr(self, "text_width_menu_slider"):
+            text_width = self._tool_stroke_widths.get(Tool.TEXT, 2)
+            if self.text_width_menu_slider.value() != text_width:
+                self.text_width_menu_slider.blockSignals(True)
+                self.text_width_menu_slider.setValue(text_width)
+                self.text_width_menu_slider.blockSignals(False)
+        if self._active_tool in WIDTH_AWARE_TOOLS:
+            self._apply_tool_stroke_width(
+                self._tool_stroke_widths[self._active_tool],
+                tool=self._active_tool,
+                persist=False,
+            )
+        if emit_signal:
+            self.tool_stroke_widths_changed.emit(dict(self._tool_stroke_widths))
+
+    def apply_tool_brush_hardness(
+        self,
+        hardness: dict[str, int] | None,
+        *,
+        emit_signal: bool = False,
+    ) -> None:
+        """
+        Restores persisted per-tool brush/eraser hardness.
+
+        Args:
+            hardness: Tool id → hardness mapping.
+            emit_signal: When True, notifies the host to persist again.
+
+        Returns:
+            None
+        """
+
+        self._tool_brush_hardness = normalize_tool_brush_hardness(hardness)
+        for tool_key, slider in self._tool_hardness_sliders.items():
+            resolved = self._tool_brush_hardness.get(tool_key, 80)
+            if slider.value() != resolved:
+                slider.blockSignals(True)
+                slider.setValue(resolved)
+                slider.blockSignals(False)
+        if self._active_tool in HARDNESS_AWARE_TOOLS:
+            self._apply_tool_brush_hardness(
+                self._tool_brush_hardness[self._active_tool],
+                tool=self._active_tool,
+                persist=False,
+            )
+        if emit_signal:
+            self.tool_brush_hardness_changed.emit(dict(self._tool_brush_hardness))
+
+    def apply_tool_stroke_styles(
+        self,
+        styles: dict[str, str] | None,
+        *,
+        emit_signal: bool = False,
+    ) -> None:
+        """
+        Restores persisted per-tool stroke styles.
+
+        Args:
+            styles: Tool id → stroke style mapping.
+            emit_signal: When True, notifies the host to persist again.
+
+        Returns:
+            None
+        """
+
+        self._tool_stroke_styles = normalize_tool_stroke_styles(styles)
+        for tool_key, combo in self._tool_style_combos.items():
+            resolved = self._tool_stroke_styles.get(tool_key, STROKE_STYLE_SOLID)
+            index = combo.findData(resolved)
+            if index >= 0 and combo.currentIndex() != index:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+        if self._active_tool in STYLE_AWARE_TOOLS:
+            self._apply_tool_stroke_style(
+                self._tool_stroke_styles[self._active_tool],
+                tool=self._active_tool,
+                persist=False,
+            )
+        if emit_signal:
+            self.tool_stroke_styles_changed.emit(dict(self._tool_stroke_styles))
+
+    def _apply_tool_stroke_width(
+        self,
+        width: int,
+        *,
+        tool: str | None = None,
+        persist: bool = True,
+    ) -> None:
+        """
+        Updates stroke width for the current selection or a tool default.
+
+        With a stroke-capable selection the width is written only to those
+        elements. Without a selection it updates the tool default used for
+        newly drawn items (``0`` disables shape/text borders).
+
+        Args:
+            width: Stroke width in pixels.
+            tool: Tool to store the width for; defaults to the active tool.
+            persist: Whether to emit the persistence signal.
+
+        Returns:
+            None
+        """
+
+        target_tool = tool if tool in WIDTH_AWARE_TOOLS else self._active_tool
+        minimum = 1 if target_tool in BRUSH_WIDTH_TOOLS else 0
+        resolved = normalize_stroke_width(width, minimum=minimum)
+
+        if self.canvas.has_stroke_width_selection():
+            self.canvas.set_style(
+                stroke_width=float(resolved),
+                emit_history=False,
+                apply_to_selection=True,
+                update_active_style=False,
+            )
+            self._set_next_history_label("Change border width")
+            self._push_history_state()
+            return
+
+        if target_tool in WIDTH_AWARE_TOOLS:
+            self._tool_stroke_widths[target_tool] = resolved
+            slider = self._tool_width_sliders.get(target_tool)
+            if slider is not None and slider.value() != resolved:
+                slider.blockSignals(True)
+                slider.setValue(resolved)
+                slider.blockSignals(False)
+        if target_tool == self._active_tool or tool is None:
+            self.canvas.set_style(
+                stroke_width=float(resolved),
+                emit_history=False,
+                apply_to_selection=False,
+                update_active_style=True,
+            )
+        if persist:
+            self.tool_stroke_widths_changed.emit(dict(self._tool_stroke_widths))
+
+    def _apply_tool_brush_hardness(
+        self,
+        hardness: int,
+        *,
+        tool: str | None = None,
+        persist: bool = True,
+    ) -> None:
+        """
+        Updates brush/eraser hardness for one tool default.
+
+        Args:
+            hardness: Hardness percentage from 0 to 100.
+            tool: Tool to store the hardness for; defaults to the active tool.
+            persist: Whether to emit the persistence signal.
+
+        Returns:
+            None
+        """
+
+        target_tool = tool if tool in HARDNESS_AWARE_TOOLS else self._active_tool
+        resolved = normalize_brush_hardness(hardness)
+        if target_tool in HARDNESS_AWARE_TOOLS:
+            self._tool_brush_hardness[target_tool] = resolved
+            slider = self._tool_hardness_sliders.get(target_tool)
+            if slider is not None and slider.value() != resolved:
+                slider.blockSignals(True)
+                slider.setValue(resolved)
+                slider.blockSignals(False)
+        if target_tool == self._active_tool or tool is None:
+            if target_tool in HARDNESS_AWARE_TOOLS:
+                self.canvas.set_brush_hardness(float(resolved))
+        if persist:
+            self.tool_brush_hardness_changed.emit(dict(self._tool_brush_hardness))
+
+    def _apply_tool_stroke_style(
+        self,
+        stroke_style: str,
+        *,
+        tool: str | None = None,
+        persist: bool = True,
+    ) -> None:
+        """
+        Updates stroke style for the current selection or a tool default.
+
+        Args:
+            stroke_style: Named stroke style.
+            tool: Tool to store the style for; defaults to the active tool.
+            persist: Whether to emit the persistence signal.
+
+        Returns:
+            None
+        """
+
+        target_tool = tool if tool in STYLE_AWARE_TOOLS else self._active_tool
+        resolved = normalize_named_stroke_style(stroke_style)
+
+        if self.canvas.has_stroke_style_selection():
+            self.canvas.set_style(
+                stroke_style=resolved,
+                emit_history=False,
+                apply_to_selection=True,
+                update_active_style=False,
+            )
+            self._set_next_history_label("Change line style")
+            self._push_history_state()
+            return
+
+        if target_tool in STYLE_AWARE_TOOLS:
+            self._tool_stroke_styles[target_tool] = resolved
+            combo = self._tool_style_combos.get(target_tool)
+            if combo is not None:
+                index = combo.findData(resolved)
+                if index >= 0 and combo.currentIndex() != index:
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(index)
+                    combo.blockSignals(False)
+        if target_tool == self._active_tool or tool is None:
+            self.canvas.set_style(
+                stroke_style=resolved,
+                emit_history=False,
+                apply_to_selection=False,
+                update_active_style=True,
+            )
+        if persist:
+            self.tool_stroke_styles_changed.emit(dict(self._tool_stroke_styles))
 
     def eventFilter(self, watched, event) -> bool:
         """
@@ -1941,6 +2525,8 @@ class EditorWindow(QMainWindow):
             Tool.TEXT,
             Tool.FILL_BG,
             Tool.BLUR,
+            Tool.STEP,
+            Tool.OCR,
             Tool.BRUSH,
             Tool.ERASER,
             Tool.BUCKET,
@@ -1991,6 +2577,13 @@ class EditorWindow(QMainWindow):
             Tool.SELECT_PATH,
             Tool.MAGIC_WAND,
             Tool.BLUR,
+            Tool.BRUSH,
+            Tool.ERASER,
+            Tool.RECT,
+            Tool.ELLIPSE,
+            Tool.LINE,
+            Tool.ARROW,
+            Tool.TEXT,
         }:
             self._popup_pixel_tool_options(tool)
 
@@ -2243,12 +2836,24 @@ class EditorWindow(QMainWindow):
         """
 
         normalized = normalize_theme_name(theme_name)
-        self.theme_dark_action.blockSignals(True)
-        self.theme_light_action.blockSignals(True)
+        for action in (
+            self.theme_dark_action,
+            self.theme_light_action,
+            self.theme_slate_action,
+            self.theme_sepia_action,
+        ):
+            action.blockSignals(True)
         self.theme_dark_action.setChecked(normalized == THEME_DARK)
         self.theme_light_action.setChecked(normalized == THEME_LIGHT)
-        self.theme_dark_action.blockSignals(False)
-        self.theme_light_action.blockSignals(False)
+        self.theme_slate_action.setChecked(normalized == THEME_SLATE)
+        self.theme_sepia_action.setChecked(normalized == THEME_SEPIA)
+        for action in (
+            self.theme_dark_action,
+            self.theme_light_action,
+            self.theme_slate_action,
+            self.theme_sepia_action,
+        ):
+            action.blockSignals(False)
 
     def refresh_theme_styles(self) -> None:
         """
@@ -2266,60 +2871,6 @@ class EditorWindow(QMainWindow):
         self._update_color_button_preview(self.fill_button, self._current_fill_color)
         self._update_color_button_preview(self.text_color_button, self._current_text_color)
         self.canvas.refresh_workspace_theme()
-
-    def _stroke_width_changed(self, value: int) -> None:
-        """
-        Updates active and selected item stroke width.
-
-        Args:
-            value: New stroke width.
-
-        Returns:
-            None
-        """
-
-        self.stroke_size_label.setText(str(int(value)))
-        self.canvas.set_style(stroke_width=float(value), emit_history=False)
-        if not self.stroke_size_slider.isSliderDown():
-            self._set_next_history_label("Change border width")
-            self._push_history_state()
-
-    def _stroke_width_committed(self) -> None:
-        """
-        Records border width history after a slider drag completes.
-
-        Returns:
-            None
-        """
-
-        self._set_next_history_label("Change border width")
-        self._push_history_state()
-
-    def _brush_hardness_changed(self, value: int) -> None:
-        """
-        Updates soft brush / eraser hardness while dragging.
-
-        Args:
-            value: Hardness percentage.
-
-        Returns:
-            None
-        """
-
-        resolved = max(0, min(100, int(value)))
-        self.canvas.set_brush_hardness(float(resolved))
-        self.brush_hardness_label.setText(f"{resolved}%")
-
-    def _brush_hardness_committed(self) -> None:
-        """
-        Finalizes brush hardness after a slider drag.
-
-        Returns:
-            None
-        """
-
-        # Hardness only affects future raster strokes; no document snapshot needed.
-        return
 
     def _blur_block_size_changed(self, value: int) -> None:
         """
@@ -2389,24 +2940,6 @@ class EditorWindow(QMainWindow):
         else:
             self.canvas.set_erase_mode(ERASE_MODE_TRANSPARENT)
 
-    def _stroke_style_changed(self, _index: int) -> None:
-        """
-        Updates the active line style for lines and arrows.
-
-        Args:
-            _index: Selected combo box index.
-
-        Returns:
-            None
-        """
-
-        stroke_style = self.stroke_style_combo.currentData()
-        if not isinstance(stroke_style, str):
-            return
-        self._set_next_history_label("Change line style")
-        self.canvas.set_style(stroke_style=stroke_style)
-        self._push_history_state()
-
     def _text_style_changed(self, _index: int) -> None:
         """
         Updates the active text container style.
@@ -2421,7 +2954,9 @@ class EditorWindow(QMainWindow):
         text_style = self.text_style_combo.currentData()
         if not isinstance(text_style, str):
             return
+        self._set_next_history_label("Change text style")
         self.canvas.set_style(text_style=text_style)
+        self._push_history_state()
 
     def _duplicate_selection(self) -> None:
         """
@@ -2835,11 +3370,18 @@ class EditorWindow(QMainWindow):
             Tool.BRUSH: "Brush stroke",
             Tool.ERASER: "Eraser stroke",
             Tool.BUCKET: "Fill selection",
+            Tool.EYEDROPPER: {
+                "Change border color",
+                "Change fill color",
+            },
         }
         expected = expected_action_by_tool.get(self._one_shot_tool)
         if expected is None:
             return
-        if action_label != expected:
+        if isinstance(expected, set):
+            if action_label not in expected:
+                return
+        elif action_label != expected:
             return
         self._one_shot_tool = None
         self._set_tool(Tool.SELECT)
@@ -2856,16 +3398,13 @@ class EditorWindow(QMainWindow):
         """
 
         selection_type = str(payload.get("type", "") or "").strip().lower()
-        if selection_type:
-            self._focus_property_tab_for_context(selection_type=selection_type)
+        # Document info is status-only. Avoid touching Text-tool popup widgets
+        # (parented under a QMenu) on every empty-canvas refresh.
+        if selection_type == "document" or not selection_type:
+            self._selection_info_label.setText(format_selection_info(payload))
+            return
 
-        stroke_width = payload.get("stroke_width")
-        if isinstance(stroke_width, (float, int)):
-            width_value = max(1, min(64, int(stroke_width)))
-            self.stroke_size_slider.blockSignals(True)
-            self.stroke_size_slider.setValue(width_value)
-            self.stroke_size_slider.blockSignals(False)
-            self.stroke_size_label.setText(str(width_value))
+        self._focus_property_tab_for_context(selection_type=selection_type)
 
         stroke_rgba = payload.get("stroke_rgba")
         if isinstance(stroke_rgba, list) and len(stroke_rgba) == 4:
@@ -2950,6 +3489,11 @@ class EditorWindow(QMainWindow):
         has_text_selection = str(payload.get("type") or "") == "text"
         text_style = str(payload.get("text_style") or TEXT_STYLE_PLAIN)
         supports_container_layout = text_style in {TEXT_STYLE_BOX, TEXT_STYLE_BUBBLE}
+        style_index = self.text_style_combo.findData(text_style)
+        if style_index >= 0:
+            self.text_style_combo.blockSignals(True)
+            self.text_style_combo.setCurrentIndex(style_index)
+            self.text_style_combo.blockSignals(False)
         self.text_letter_spacing_spin.setEnabled(has_text_selection)
         self.text_line_spacing_spin.setEnabled(supports_container_layout)
         self.text_padding_spin.setEnabled(supports_container_layout)
@@ -3273,7 +3817,7 @@ class EditorWindow(QMainWindow):
 
     def _set_eyedropper_target(self, target: str) -> None:
         """
-        Sets whether the eyedropper writes border or fill color.
+        Sets whether the color picker writes border or fill color.
 
         Args:
             target: ``stroke`` or ``fill``.
@@ -3825,7 +4369,7 @@ class EditorWindow(QMainWindow):
 
     def export_with_dialog(self) -> None:
         """
-        Opens one unified export dialog for PNG, JPG, and PDF.
+        Opens one unified export dialog for PNG, JPG, PDF, and SVG.
 
         Returns:
             None
@@ -3835,7 +4379,7 @@ class EditorWindow(QMainWindow):
             self,
             "Export",
             "",
-            "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;PDF Files (*.pdf)",
+            "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;PDF Files (*.pdf);;SVG Files (*.svg)",
         )
         if not file_path:
             return
@@ -3856,6 +4400,15 @@ class EditorWindow(QMainWindow):
             self._jpeg_quality = quality
             self._export_output_pixmap(for_jpeg=True).save(file_path, "JPG", quality)
             self.statusBar().showMessage("Exported JPG")
+            return
+
+        if "SVG" in selected_filter or file_path.lower().endswith(".svg"):
+            if not file_path.lower().endswith(".svg"):
+                file_path = f"{file_path}.svg"
+            if self._write_svg_to_path(file_path):
+                self.statusBar().showMessage("Exported SVG")
+            else:
+                QMessageBox.warning(self, APP_NAME, "SVG export failed.")
             return
 
         if not file_path.lower().endswith(".pdf"):
@@ -3892,6 +4445,29 @@ class EditorWindow(QMainWindow):
         self._write_pdf_to_path(file_path, dpi)
         self.statusBar().showMessage("Exported PDF")
 
+    def export_svg(self) -> None:
+        """
+        Exports the composited screenshot as a standard SVG file.
+
+        Returns:
+            None
+        """
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export as SVG",
+            "",
+            "SVG Files (*.svg);;All Files (*)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".svg"):
+            file_path = f"{file_path}.svg"
+        if self._write_svg_to_path(file_path):
+            self.statusBar().showMessage("Exported SVG")
+            return
+        QMessageBox.warning(self, APP_NAME, "SVG export failed.")
+
     def _write_pdf_to_path(self, file_path: str, dpi: int) -> None:
         """
         Writes current composited image as PDF to target path.
@@ -3922,6 +4498,22 @@ class EditorWindow(QMainWindow):
         y_offset = int((page_rect.height() - scaled.height()) / 2)
         painter.drawPixmap(x_offset, y_offset, scaled)
         painter.end()
+
+    def _write_svg_to_path(self, file_path: str) -> bool:
+        """
+        Writes the current composited image as a standard SVG file.
+
+        Args:
+            file_path: SVG output path.
+
+        Returns:
+            bool: True when the SVG file was written.
+        """
+
+        from src.image_export import write_pixmap_as_svg
+
+        pixmap = self._export_output_pixmap(for_jpeg=False)
+        return write_pixmap_as_svg(pixmap, file_path)
 
     def _ask_jpeg_quality(self, default: int) -> int | None:
         """
@@ -4104,7 +4696,7 @@ class EditorWindow(QMainWindow):
             formats = [
                 str(value).strip().lower()
                 for value in list(profile.get("formats", []))
-                if str(value).strip().lower() in {"png", "jpg", "pdf"}
+                if str(value).strip().lower() in {"png", "jpg", "pdf", "svg"}
             ]
             if not formats:
                 formats = ["png"]
@@ -4528,6 +5120,7 @@ class EditorWindow(QMainWindow):
         include_png = bool(export_options["include_png"])
         include_jpg = bool(export_options["include_jpg"])
         include_pdf = bool(export_options["include_pdf"])
+        include_svg = bool(export_options["include_svg"])
         self._jpeg_quality = int(export_options["jpg_quality"])
         self._pdf_dpi = int(export_options["pdf_dpi"])
         selected_profile_key = str(export_options["selected_profile_key"])
@@ -4544,6 +5137,7 @@ class EditorWindow(QMainWindow):
                         ("png", include_png),
                         ("jpg", include_jpg),
                         ("pdf", include_pdf),
+                        ("svg", include_svg),
                     )
                     if enabled
                 ],
@@ -4579,6 +5173,8 @@ class EditorWindow(QMainWindow):
             queue.append(("jpg", target_root / f"{normalized_base}.jpg"))
         if include_pdf:
             queue.append(("pdf", target_root / f"{normalized_base}.pdf"))
+        if include_svg:
+            queue.append(("svg", target_root / f"{normalized_base}.svg"))
 
         progress = QProgressDialog(
             "Starting batch export...",
@@ -4603,6 +5199,9 @@ class EditorWindow(QMainWindow):
                     saved_targets.append(str(target))
             elif fmt == "jpg":
                 if pixmap_jpg.save(str(target), "JPG", max(1, min(100, self._jpeg_quality))):
+                    saved_targets.append(str(target))
+            elif fmt == "svg":
+                if self._write_svg_to_path(str(target)):
                     saved_targets.append(str(target))
             else:
                 self._write_pdf_to_path(str(target), max(72, min(1200, self._pdf_dpi)))
@@ -4660,9 +5259,12 @@ class EditorWindow(QMainWindow):
         jpg_check.setChecked("jpg" in list(current_profile.get("formats", [])))
         pdf_check = QCheckBox("PDF")
         pdf_check.setChecked("pdf" in list(current_profile.get("formats", [])))
+        svg_check = QCheckBox("SVG")
+        svg_check.setChecked("svg" in list(current_profile.get("formats", [])))
         layout.addWidget(png_check)
         layout.addWidget(jpg_check)
         layout.addWidget(pdf_check)
+        layout.addWidget(svg_check)
 
         quality_row = QHBoxLayout()
         quality_row.setSpacing(6)
@@ -4697,6 +5299,7 @@ class EditorWindow(QMainWindow):
             png_check.setChecked("png" in selected_formats)
             jpg_check.setChecked("jpg" in selected_formats)
             pdf_check.setChecked("pdf" in selected_formats)
+            svg_check.setChecked("svg" in selected_formats)
             jpg_quality_spin.setValue(int(selected_profile.get("jpg_quality", 90)))
             pdf_dpi_spin.setValue(int(selected_profile.get("pdf_dpi", 300)))
 
@@ -4715,7 +5318,8 @@ class EditorWindow(QMainWindow):
         include_png = bool(png_check.isChecked())
         include_jpg = bool(jpg_check.isChecked())
         include_pdf = bool(pdf_check.isChecked())
-        if not any((include_png, include_jpg, include_pdf)):
+        include_svg = bool(svg_check.isChecked())
+        if not any((include_png, include_jpg, include_pdf, include_svg)):
             QMessageBox.warning(self, APP_NAME, "Select at least one format.")
             return None
         selected_profile_key = str(profile_combo.currentData() or current_profile["key"])
@@ -4723,6 +5327,7 @@ class EditorWindow(QMainWindow):
             "include_png": include_png,
             "include_jpg": include_jpg,
             "include_pdf": include_pdf,
+            "include_svg": include_svg,
             "jpg_quality": int(jpg_quality_spin.value()),
             "pdf_dpi": int(pdf_dpi_spin.value()),
             "selected_profile_key": self._normalize_batch_profile_key(selected_profile_key),
@@ -5094,25 +5699,42 @@ class EditorWindow(QMainWindow):
 
         if not self._recovery_path:
             return
+        if getattr(self, "_autosave_flushing", False):
+            return
+
+        from shiboken6 import isValid
+
+        if not isValid(self):
+            return
+        canvas = getattr(self, "canvas", None)
+        if canvas is None or not isValid(canvas):
+            return
 
         from src.session_recovery import ensure_tab_recovery_path
 
-        self._recovery_path = ensure_tab_recovery_path(self._recovery_path)
-
-        model = build_project_model(
-            screenshot=self.canvas.screenshot(),
-            annotation_models=self.canvas.collect_annotations(),
-        )
+        self._autosave_flushing = True
         try:
-            save_project(self._recovery_path, model)
-        except OSError:
-            return
+            self._recovery_path = ensure_tab_recovery_path(self._recovery_path)
 
-        if self._current_project_path and self._current_project_path != self._recovery_path:
+            model = build_project_model(
+                screenshot=self.canvas.screenshot(),
+                annotation_models=self.canvas.collect_annotations(),
+            )
             try:
-                save_project(self._current_project_path, model)
+                save_project(self._recovery_path, model)
             except OSError:
                 return
+
+            if self._current_project_path and self._current_project_path != self._recovery_path:
+                try:
+                    save_project(self._current_project_path, model)
+                except OSError:
+                    return
+        except RuntimeError:
+            # Shiboken raises when underlying Qt objects were already deleted.
+            return
+        finally:
+            self._autosave_flushing = False
 
     def set_minimize_to_tray_on_close(self, enabled: bool) -> None:
         """
@@ -5174,5 +5796,9 @@ class EditorWindow(QMainWindow):
         if not self.confirm_close_if_needed():
             event.ignore()
             return
+        autosave_timer = getattr(self, "_autosave_timer", 0)
+        if autosave_timer:
+            self.killTimer(autosave_timer)
+            self._autosave_timer = 0
         super().closeEvent(event)
 

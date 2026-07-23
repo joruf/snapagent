@@ -55,8 +55,9 @@ StartupWMClass=snappix
 EOF
 
 cp "$APPDIR/snappix.desktop" "$APPDIR/usr/share/applications/snappix.desktop"
-cp "$PROJECT_ROOT/assets/snappix.svg" "$APPDIR/snappix.svg"
-cp "$PROJECT_ROOT/assets/snappix.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/snappix.svg"
+cp "$PROJECT_ROOT/assets/snappix-red.svg" "$APPDIR/snappix.svg"
+cp "$PROJECT_ROOT/assets/snappix-red.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/snappix.svg"
+cp "$PROJECT_ROOT/assets/snappix.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/snappix-editor.svg"
 
 mkdir -p "$DIST_DIR"
 OUTPUT_FILE="$DIST_DIR/Snappix-${APP_VERSION}-x86_64.AppImage"
