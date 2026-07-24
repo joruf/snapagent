@@ -132,6 +132,22 @@ class SettingsDialog(QDialog):
         self.hotkey_fullscreen_edit.setPlaceholderText("ctrl+shift+f")
         form.addRow("Capture fullscreen:", self.hotkey_fullscreen_edit)
 
+        self.hotkey_video_edit = QLineEdit(config.hotkey_capture_video)
+        self.hotkey_video_edit.setPlaceholderText("ctrl+shift+v")
+        form.addRow("Capture video:", self.hotkey_video_edit)
+
+        self.hotkey_recording_pause_resume_edit = QLineEdit(
+            config.hotkey_recording_pause_resume
+        )
+        self.hotkey_recording_pause_resume_edit.setPlaceholderText("ctrl+shift+p")
+        form.addRow(
+            "Pause/resume recording:", self.hotkey_recording_pause_resume_edit
+        )
+
+        self.hotkey_recording_stop_edit = QLineEdit(config.hotkey_recording_stop)
+        self.hotkey_recording_stop_edit.setPlaceholderText("ctrl+shift+r")
+        form.addRow("Stop recording:", self.hotkey_recording_stop_edit)
+
         self.post_capture_combo = QComboBox()
         for action_key, action_label in POST_CAPTURE_ACTIONS.items():
             self.post_capture_combo.addItem(action_label, action_key)
@@ -325,6 +341,13 @@ class SettingsDialog(QDialog):
             hotkey_capture_fullscreen=normalize_hotkey_spec(
                 self.hotkey_fullscreen_edit.text()
             ),
+            hotkey_capture_video=normalize_hotkey_spec(self.hotkey_video_edit.text()),
+            hotkey_recording_pause_resume=normalize_hotkey_spec(
+                self.hotkey_recording_pause_resume_edit.text()
+            ),
+            hotkey_recording_stop=normalize_hotkey_spec(
+                self.hotkey_recording_stop_edit.text()
+            ),
             post_capture_action=normalize_post_capture_action(
                 str(self.post_capture_combo.currentData())
             ),
@@ -430,6 +453,9 @@ class SettingsDialog(QDialog):
             ("Capture area", config.hotkey_capture_region),
             ("Capture window", config.hotkey_capture_window),
             ("Capture fullscreen", config.hotkey_capture_fullscreen),
+            ("Capture video", config.hotkey_capture_video),
+            ("Pause/resume recording", config.hotkey_recording_pause_resume),
+            ("Stop recording", config.hotkey_recording_stop),
         ]
         for label, spec in checks:
             if hotkey_spec_to_pynput(spec) is None:

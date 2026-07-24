@@ -45,10 +45,10 @@ REQUIRED_SYSTEM_PACKAGE_MAP: dict[str, list[str]] = {
 }
 
 RECOMMENDED_SYSTEM_PACKAGE_MAP: dict[str, list[str]] = {
-    "apt-get": ["grim", "slurp"],
-    "dnf": ["grim", "slurp"],
-    "pacman": ["grim", "slurp"],
-    "zypper": ["grim", "slurp"],
+    "apt-get": ["grim", "slurp", "ffmpeg"],
+    "dnf": ["grim", "slurp", "ffmpeg"],
+    "pacman": ["grim", "slurp", "ffmpeg"],
+    "zypper": ["grim", "slurp", "ffmpeg"],
 }
 
 # Backward-compatible alias used by packaging docs and older callers.
@@ -106,7 +106,7 @@ def detect_missing_system_dependencies() -> list[str]:
 
 def detect_missing_recommended_dependencies() -> list[str]:
     """
-    Detects missing recommended Wayland capture tools.
+    Detects missing recommended Wayland capture and video recording tools.
 
     Returns:
         list[str]: Missing recommended dependency keys.
@@ -117,6 +117,8 @@ def detect_missing_recommended_dependencies() -> list[str]:
         missing.append("grim")
     if which("slurp") is None:
         missing.append("slurp")
+    if which("ffmpeg") is None:
+        missing.append("ffmpeg")
     return missing
 
 
@@ -310,7 +312,7 @@ def install_system_dependencies(project_dir: Path) -> int:
         print(
             "Snappix installer warning: recommended tools still missing: "
             + ", ".join(recommended_missing)
-            + ". Wayland region capture may be limited."
+            + ". Wayland region capture and/or video recording may be limited."
         )
         return 0
 
@@ -333,7 +335,7 @@ def install_system_dependencies(project_dir: Path) -> int:
             print(
                 "Snappix installer warning: recommended tools still missing: "
                 + ", ".join(still_recommended)
-                + ". Wayland region capture may be limited."
+                + ". Wayland region capture and/or video recording may be limited."
             )
         return 0
 
@@ -365,7 +367,7 @@ def install_system_dependencies(project_dir: Path) -> int:
             print(
                 "Snappix installer warning: recommended tools still missing: "
                 + ", ".join(still_recommended)
-                + ". Wayland region capture may be limited."
+                + ". Wayland region capture and/or video recording may be limited."
             )
         return 0
 
@@ -393,7 +395,7 @@ def install_system_dependencies(project_dir: Path) -> int:
         print(
             "Snappix installer warning: recommended tools still missing: "
             + ", ".join(still_recommended)
-            + ". Wayland region capture may be limited."
+            + ". Wayland region capture and/or video recording may be limited."
         )
     return 0
 

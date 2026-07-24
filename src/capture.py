@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from shutil import which
 from typing import Callable
 
-from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QCursor,
@@ -197,6 +197,7 @@ class CapturePanel(QWidget):
     """
 
     capture_requested = Signal(CaptureRequest)
+    video_capture_requested = Signal()
     color_pick_requested = Signal()
     autostart_toggled = Signal(bool)
     close_requested = Signal()
@@ -299,6 +300,14 @@ class CapturePanel(QWidget):
         )
         buttons.addWidget(self.capture_scroll_button)
 
+        self.capture_video_button = QPushButton("Capture Video")
+        self.capture_video_button.setObjectName("primaryButton")
+        self.capture_video_button.setToolTip(
+            "Select a screen region and record it to video."
+        )
+        self.capture_video_button.clicked.connect(self.video_capture_requested.emit)
+        buttons.addWidget(self.capture_video_button)
+
         self.pick_color_button = QPushButton("")
         self.pick_color_button.setIcon(_build_color_picker_icon())
         self.pick_color_button.setFixedSize(32, 32)
@@ -309,6 +318,27 @@ class CapturePanel(QWidget):
         buttons.addWidget(self.pick_color_button)
 
         root_layout.addLayout(buttons)
+
+    def set_video_capture_available(self, available: bool) -> None:
+        """
+        Enables or disables the video capture button based on ffmpeg availability.
+
+        Args:
+            available: Whether ffmpeg was found on the system.
+
+        Returns:
+            None
+        """
+
+        self.capture_video_button.setEnabled(available)
+        if available:
+            self.capture_video_button.setToolTip(
+                "Select a screen region and record it to video."
+            )
+        else:
+            self.capture_video_button.setToolTip(
+                "Video capture requires ffmpeg. Please install ffmpeg to enable this feature."
+            )
 
     def _emit_request_for_mode(self, mode: str) -> None:
         """
@@ -454,6 +484,7 @@ class RegionCaptureOverlay(QWidget):
 
     capture_done = Signal(QPixmap)
     capture_cancelled = Signal()
+    region_selected = Signal(QRect)
 
     def __init__(self, screenshot: QPixmap, virtual_geometry: QRect) -> None:
         """
@@ -578,6 +609,7 @@ class RegionCaptureOverlay(QWidget):
         rect = QRect(self._start_point, self._current_point).normalized()
         if rect.width() > 3 and rect.height() > 3:
             self.capture_done.emit(self._screenshot.copy(rect))
+            self.region_selected.emit(rect.translated(self._virtual_geometry.topLeft()))
         else:
             self.capture_cancelled.emit()
         self.close()
@@ -622,6 +654,119 @@ class RegionCaptureOverlay(QWidget):
         super().closeEvent(event)
 
 
+RECORDING_BORDER_THICKNESS = 4
+RECORDING_BORDER_BLINK_MS = 600
+RECORDING_BORDER_ACTIVE_COLOR = QColor(231, 76, 60, 255)
+RECORDING_BORDER_PAUSED_COLOR = QColor(243, 156, 18, 255)
+
+
+class RecordingBorderOverlay(QWidget):
+    """
+    Blinking border shown just outside the region currently being video-recorded.
+
+    The border is drawn entirely outside the recorded pixels (in a margin
+    added around the capture rect) so it never contaminates the ffmpeg
+    capture itself -- it is purely a visual indicator for the user.
+    """
+
+    def __init__(self, capture_rect: QRect) -> None:
+        """
+        Initializes the border overlay around one screen-recording region.
+
+        Args:
+            capture_rect: Recorded region in absolute virtual-desktop coordinates.
+        """
+
+        super().__init__()
+        self._paused = False
+        self._blink_on = True
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowTransparentForInput
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        outer_rect = capture_rect.adjusted(
+            -RECORDING_BORDER_THICKNESS,
+            -RECORDING_BORDER_THICKNESS,
+            RECORDING_BORDER_THICKNESS,
+            RECORDING_BORDER_THICKNESS,
+        )
+        self.setGeometry(outer_rect)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._on_blink_tick)
+        self._timer.start(RECORDING_BORDER_BLINK_MS)
+
+    def set_paused(self, paused: bool) -> None:
+        """
+        Switches the border between the blinking "recording" and static "paused" look.
+
+        Args:
+            paused: True to show a static paused-colored border.
+
+        Returns:
+            None
+        """
+
+        self._paused = paused
+        self._blink_on = True
+        self.update()
+
+    def _on_blink_tick(self) -> None:
+        """
+        Toggles the visible blink phase while actively recording.
+
+        Returns:
+            None
+        """
+
+        if self._paused:
+            return
+        self._blink_on = not self._blink_on
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        """
+        Paints the border ring in the margin surrounding the recorded region.
+
+        Returns:
+            None
+        """
+
+        if not self._paused and not self._blink_on:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        color = RECORDING_BORDER_PAUSED_COLOR if self._paused else RECORDING_BORDER_ACTIVE_COLOR
+        painter.setPen(QPen(color, RECORDING_BORDER_THICKNESS))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        half = RECORDING_BORDER_THICKNESS / 2.0
+        painter.drawRect(
+            QRectF(
+                half,
+                half,
+                self.width() - RECORDING_BORDER_THICKNESS,
+                self.height() - RECORDING_BORDER_THICKNESS,
+            )
+        )
+
+    def closeEvent(self, event) -> None:
+        """
+        Stops the blink timer before the overlay closes.
+
+        Args:
+            event: Qt close event.
+
+        Returns:
+            None
+        """
+
+        self._timer.stop()
+        super().closeEvent(event)
+
 
 def _capture_region_via_grim_slurp() -> QPixmap | None:
     """
@@ -638,7 +783,7 @@ def _capture_region_via_grim_slurp() -> QPixmap | None:
     pixmap = QPixmap()
     if not pixmap.loadFromData(png_bytes, "PNG"):
         return None
-        return pixmap
+    return pixmap
 
 
 class ScrollCaptureProgressDialog(QProgressDialog):
@@ -1928,6 +2073,44 @@ def _untrack_overlay(overlay: QWidget) -> None:
 
     if overlay in _ACTIVE_OVERLAYS:
         _ACTIVE_OVERLAYS.remove(overlay)
+
+
+def select_video_region(
+    on_selected: Callable[[QRect], None],
+    on_cancel: Callable[[], None],
+) -> None:
+    """
+    Shows the drag-select overlay for a video recording region.
+
+    Args:
+        on_selected: Callback invoked with the selected region in absolute
+            virtual-desktop coordinates.
+        on_cancel: Callback invoked when the selection is cancelled.
+
+    Returns:
+        None
+    """
+
+    def begin_selection() -> None:
+        snapshot = capture_full_screen()
+        screenshot = snapshot.pixmap
+        virtual_geometry = snapshot.virtual_geometry
+        if screenshot.isNull() or virtual_geometry.isNull():
+            on_cancel()
+            return
+
+        overlay = RegionCaptureOverlay(screenshot, virtual_geometry)
+        _track_overlay(overlay)
+        overlay.region_selected.connect(on_selected)
+        overlay.region_selected.connect(lambda _rect: _untrack_overlay(overlay))
+        overlay.capture_cancelled.connect(on_cancel)
+        overlay.capture_cancelled.connect(lambda: _untrack_overlay(overlay))
+        overlay.show()
+        overlay.raise_()
+        overlay.activateWindow()
+        overlay.grabKeyboard()
+
+    schedule_capture_after_ui_settle(begin_selection)
 
 
 def _build_color_picker_icon() -> QIcon:

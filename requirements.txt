@@ -1,4 +1,7 @@
-PySide6
-Pillow
-requests
-pynput
+# Pinned exactly: an unpinned install could silently pull in a newer major
+# version with breaking API/behavior changes and break the whole app on next
+# fresh install. Bump these deliberately, then test, rather than floating.
+PySide6==6.11.1
+Pillow==12.3.0
+requests==2.34.2
+pynput==1.8.2

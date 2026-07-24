@@ -9,6 +9,10 @@ APP_FILE_EXTENSION = ".sfp"
 PROJECT_FORMAT_NAME = "snappix-project"
 PROJECT_FORMAT_VERSION = 3
 
+VIDEO_PROJECT_FILE_EXTENSION = ".sfpv"
+VIDEO_PROJECT_FORMAT_NAME = "snappix-video-project"
+VIDEO_PROJECT_FORMAT_VERSION = 1
+
 ABOUT_AUTHOR = "Joachim Ruf"
 ABOUT_WEBSITE = "loresoft.de"
 ABOUT_GITHUB = "https://github.com/joruf/snappix"

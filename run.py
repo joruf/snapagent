@@ -488,6 +488,7 @@ class AppController:
             QStackedWidget,
             QSystemTrayIcon,
             QTabWidget,
+            QToolButton,
             QVBoxLayout,
             QWidget,
         )
@@ -522,6 +523,8 @@ class AppController:
                     return
                 super().closeEvent(event)
 
+        from src.video_recorder import has_ffmpeg
+
         self._QMessageBox = QMessageBox
         self.app = app
         self._startup_project_path = startup_project_path.strip()
@@ -536,7 +539,10 @@ class AppController:
         self.capture_panel.autostart_toggled.connect(self.toggle_autostart)
         self.capture_panel.close_requested.connect(self._on_capture_panel_close)
         self.capture_panel.editor_requested.connect(self.open_editor_from_capture)
+        self.capture_panel.video_capture_requested.connect(self.start_video_capture)
+        self.capture_panel.set_video_capture_available(has_ffmpeg())
         self.editors: list[EditorWindow] = []
+        self.video_editors: list = []
 
         config_dir = Path.home() / ".config" / "snappix"
         self.config_manager = ConfigManager(config_dir / "config.json")
@@ -563,6 +569,16 @@ class AppController:
         self._hotkey_bridge.triggered.connect(self._on_global_hotkey)
         self._hotkey_manager = GlobalHotkeyManager(self._hotkey_bridge)
         self._capture_in_progress = False
+
+        from src.video_recorder import VideoRecorder
+
+        self._video_recorder = VideoRecorder()
+        self._video_recorder.state_changed.connect(self._on_recording_state_changed)
+        self._video_recorder.failed.connect(self._on_recording_failed)
+        self._video_recorder.finished.connect(self._on_recording_finished)
+        self._recording_in_progress = False
+        self._recording_rect = None
+        self._recording_border_overlay = None
         self.editor_host = EditorHostWindow()
         self.editor_host.setWindowIcon(self._editor_icon)
         self.editor_host.setWindowTitle(f"{APP_NAME} Editor")
@@ -571,6 +587,12 @@ class AppController:
         self.editor_tabs = QTabWidget(self.editor_stack)
         self.editor_tabs.setTabsClosable(True)
         self.editor_tabs.tabCloseRequested.connect(self._close_editor_tab_by_index)
+        new_tab_corner_button = QToolButton(self.editor_tabs)
+        new_tab_corner_button.setText("+")
+        new_tab_corner_button.setToolTip("New empty tab (Ctrl+T).")
+        new_tab_corner_button.setAutoRaise(True)
+        new_tab_corner_button.clicked.connect(self.create_empty_editor_tab)
+        self.editor_tabs.setCornerWidget(new_tab_corner_button, Qt.Corner.TopRightCorner)
         self.editor_empty_state = QWidget(self.editor_stack)
         empty_layout = QVBoxLayout(self.editor_empty_state)
         empty_layout.setContentsMargins(40, 40, 40, 40)
@@ -628,6 +650,18 @@ class AppController:
             capture_window_action = QAction("Capture Window Under Cursor", tray_menu)
             capture_window_action.triggered.connect(self.capture_window_from_tray)
             tray_menu.addAction(capture_window_action)
+            capture_video_action = QAction("Capture Video", tray_menu)
+            capture_video_action.triggered.connect(self.start_video_capture)
+            capture_video_action.setEnabled(has_ffmpeg())
+            tray_menu.addAction(capture_video_action)
+            self.recording_pause_action = QAction("Pause Recording", tray_menu)
+            self.recording_pause_action.triggered.connect(self._toggle_recording_pause)
+            self.recording_pause_action.setVisible(False)
+            tray_menu.addAction(self.recording_pause_action)
+            self.recording_stop_action = QAction("Stop Recording", tray_menu)
+            self.recording_stop_action.triggered.connect(self.stop_video_recording)
+            self.recording_stop_action.setVisible(False)
+            tray_menu.addAction(self.recording_stop_action)
             tray_menu.addSeparator()
             self.autostart_tray_action = QAction("Start at boot", tray_menu)
             self.autostart_tray_action.setCheckable(True)
@@ -721,6 +755,19 @@ class AppController:
 
         from src.capture import CaptureMode, CaptureRequest
 
+        if action == "capture_video":
+            if not self._capture_in_progress and not self._recording_in_progress:
+                self.start_video_capture()
+            return
+        if action == "recording_pause_resume":
+            if self._recording_in_progress:
+                self._toggle_recording_pause()
+            return
+        if action == "recording_stop":
+            if self._recording_in_progress:
+                self.stop_video_recording()
+            return
+
         if self._capture_in_progress:
             return
 
@@ -738,6 +785,219 @@ class AppController:
             delay_seconds=int(self.capture_panel.delay_slider.value()),
         )
         self.start_capture(request)
+
+    def start_video_capture(self) -> None:
+        """
+        Starts the video capture flow: region selection followed by recording.
+
+        Returns:
+            None
+        """
+
+        from src.capture import select_video_region
+
+        if self._capture_in_progress or self._recording_in_progress:
+            return
+
+        self._hide_windows_for_capture()
+        select_video_region(
+            on_selected=self._begin_video_recording,
+            on_cancel=self.capture_panel.show,
+        )
+
+    def _begin_video_recording(self, rect) -> None:
+        """
+        Starts ffmpeg recording for one selected screen region.
+
+        Args:
+            rect: Selected region in absolute virtual-desktop coordinates.
+
+        Returns:
+            None
+        """
+
+        recordings_dir = self._capture_save_directory() / "tmp"
+        recordings_dir.mkdir(parents=True, exist_ok=True)
+        output_path = recordings_dir / datetime.now().strftime("snappix-recording_%Y-%m-%d_%H-%M-%S.mp4")
+
+        started = self._video_recorder.start(rect, output_path, record_microphone=True)
+        if not started:
+            self.capture_panel.show()
+            return
+
+        from src.capture import RecordingBorderOverlay
+
+        self._recording_rect = self._video_recorder.clamped_rect
+        self._recording_in_progress = True
+        self._recording_border_overlay = RecordingBorderOverlay(self._recording_rect)
+        self._recording_border_overlay.show()
+        if self._tray_available and self.tray_icon.isVisible():
+            self.tray_icon.showMessage(
+                APP_NAME,
+                "Recording started",
+                self.tray_icon.MessageIcon.Information,
+                2200,
+            )
+
+    def _toggle_recording_pause(self) -> None:
+        """
+        Pauses or resumes the active recording.
+
+        Returns:
+            None
+        """
+
+        from src.video_recorder import RecordingState
+
+        if self._video_recorder.state == RecordingState.PAUSED:
+            self._video_recorder.resume()
+        else:
+            self._video_recorder.pause()
+
+    def stop_video_recording(self) -> None:
+        """
+        Stops the active recording, finalizing the output video file.
+
+        Returns:
+            None
+        """
+
+        self._video_recorder.stop()
+
+    def _on_recording_state_changed(self, state: str) -> None:
+        """
+        Updates tray recording controls when the recorder's state changes.
+
+        Args:
+            state: New recorder state (RecordingState constant).
+
+        Returns:
+            None
+        """
+
+        from src.video_recorder import RecordingState
+
+        if self._recording_border_overlay is not None:
+            self._recording_border_overlay.set_paused(state == RecordingState.PAUSED)
+
+        if not self._tray_available:
+            return
+
+        is_active = state in (RecordingState.RECORDING, RecordingState.PAUSED)
+        self.recording_pause_action.setVisible(is_active)
+        self.recording_stop_action.setVisible(is_active)
+        self.recording_pause_action.setText(
+            "Resume Recording" if state == RecordingState.PAUSED else "Pause Recording"
+        )
+
+    def _close_recording_border_overlay(self) -> None:
+        """
+        Closes and clears the blinking recording-border overlay, if shown.
+
+        Returns:
+            None
+        """
+
+        if self._recording_border_overlay is None:
+            return
+        self._recording_border_overlay.close()
+        self._recording_border_overlay = None
+
+    def _on_recording_failed(self, message: str) -> None:
+        """
+        Shows an error dialog when the recorder could not start or run.
+
+        Args:
+            message: Human-readable failure description.
+
+        Returns:
+            None
+        """
+
+        self._recording_in_progress = False
+        self._close_recording_border_overlay()
+        self.capture_panel.show()
+        self._QMessageBox.warning(self.capture_panel, "Video Recording", message)
+
+    def _on_recording_finished(self, output_path: str) -> None:
+        """
+        Opens the video editor for one finished recording.
+
+        Args:
+            output_path: Path to the finalized MP4 recording.
+
+        Returns:
+            None
+        """
+
+        self._recording_in_progress = False
+        self._close_recording_border_overlay()
+        rect = self._recording_rect
+        self._recording_rect = None
+
+        if self._tray_available and self.tray_icon.isVisible():
+            self.tray_icon.showMessage(
+                APP_NAME,
+                "Recording saved, opening editor",
+                self.tray_icon.MessageIcon.Information,
+                2800,
+            )
+
+        width = rect.width() if rect is not None else 0
+        height = rect.height() if rect is not None else 0
+        self._create_video_editor_tab(output_path, width, height, "Recording")
+
+    def _create_video_editor_tab(self, video_path: str, width: int, height: int, title: str):
+        """
+        Creates one video editor tab for a recorded video and focuses the editor host.
+
+        Args:
+            video_path: Path to the recorded video file.
+            width: Video width in pixels.
+            height: Video height in pixels.
+            title: Tab title text.
+
+        Returns:
+            VideoEditorWindow: Created video editor instance.
+        """
+
+        from src.video_editor_window import VideoEditorWindow
+
+        editor = VideoEditorWindow(video_path, width, height)
+        editor.setWindowIcon(self._editor_icon)
+        editor.set_minimize_to_tray_on_close(False)
+        editor.setParent(self.editor_tabs)
+        tab_index = self.editor_tabs.addTab(editor, title)
+        self.editor_tabs.setCurrentIndex(tab_index)
+        self._sync_editor_host_view()
+        editor.show()
+        editor.destroyed.connect(lambda *_: self._on_video_editor_closed(editor))
+        self.video_editors.append(editor)
+        self._show_editor_host()
+        return editor
+
+    def _on_video_editor_closed(self, editor) -> None:
+        """
+        Removes a closed video editor tab from tracking.
+
+        Args:
+            editor: Closed video editor window.
+
+        Returns:
+            None
+        """
+
+        if self._is_quitting:
+            return
+        if editor in self.video_editors:
+            self.video_editors.remove(editor)
+        try:
+            tab_index = self.editor_tabs.indexOf(editor)
+            if tab_index >= 0:
+                self.editor_tabs.removeTab(tab_index)
+            self._handle_empty_editor_tabs()
+        except RuntimeError:
+            return
 
     def show_settings_dialog(self) -> None:
         """
@@ -1333,6 +1593,10 @@ class AppController:
         for tab_index in range(self.editor_tabs.count()):
             editor = self.editor_tabs.widget(tab_index)
             if editor is None:
+                continue
+            if editor in self.video_editors:
+                # Video editor tabs intentionally don't participate in
+                # crash-recovery/session-restore (see _create_video_editor_tab).
                 continue
             try:
                 self._flush_editor_tab_recovery(editor)

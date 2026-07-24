@@ -136,12 +136,22 @@ class GlobalHotkeyManager:
             (config.hotkey_capture_region, "capture_region"),
             (config.hotkey_capture_window, "capture_window"),
             (config.hotkey_capture_fullscreen, "capture_fullscreen"),
+            (config.hotkey_capture_video, "capture_video"),
+            (config.hotkey_recording_pause_resume, "recording_pause_resume"),
+            (config.hotkey_recording_stop, "recording_stop"),
         ]
         for spec, action in bindings:
             pynput_spec = hotkey_spec_to_pynput(spec)
             if pynput_spec is None:
                 continue
             mapping[pynput_spec] = self._make_callback(action)
+
+        # Escape always stops an active recording too, in addition to whatever
+        # the user configured for "stop recording" above. This listener is
+        # passive (does not suppress the key), so Escape still reaches
+        # whatever application has focus as normal; the callback itself is a
+        # no-op unless a recording is actually in progress.
+        mapping.setdefault("<esc>", self._make_callback("recording_stop"))
 
         if not mapping:
             self._last_error = "No valid global hotkeys were configured."

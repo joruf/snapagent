@@ -21,7 +21,7 @@ On first start Snappix creates a local `.venv`, installs Python packages, checks
 
 ```bash
 # Debian / Ubuntu
-sudo apt install libxcb-cursor0 python3-tk python3-venv xdotool x11-utils tesseract-ocr grim slurp
+sudo apt install libxcb-cursor0 python3-tk python3-venv xdotool x11-utils tesseract-ocr grim slurp ffmpeg
 ```
 
 | Package | Why |
@@ -31,6 +31,7 @@ sudo apt install libxcb-cursor0 python3-tk python3-venv xdotool x11-utils tesser
 | `xdotool`, `x11-utils` | Window / scroll capture on X11 |
 | `tesseract-ocr` | OCR tool |
 | `grim`, `slurp` | Recommended for Wayland region / fullscreen capture |
+| `ffmpeg` | Recommended for video recording and export (X11 only for now) |
 
 ### Requirements
 
@@ -62,6 +63,17 @@ Artifacts land in `dist/`. Tag `v1.2.0` (or run **Release Build** in GitHub Acti
 - Post-capture: open editor, copy clipboard, or save to folder
 - Global hotkeys (default `Ctrl+Shift+A/W/F`)
 - Wayland region capture via `grim` + `slurp` when available
+
+### Video (X11 only)
+
+- **Capture Video** button: select a region, then record it with `ffmpeg` (requires `ffmpeg`)
+- Pause / Resume / Stop from the system tray or global hotkeys (default `Ctrl+Shift+V/P/R`)
+- Optional microphone audio track
+- **Video Editor** tab: playback with a scrubbable timeline, draw Rectangle/Ellipse/Line/Arrow/Text
+  annotations that appear only within a chosen time range, drag annotation bars to move or
+  resize their start/end
+- Save a re-editable project (`.sfpv`, raw video + timeline) or export a flattened MP4 with
+  annotations burned in
 
 ### Editor
 

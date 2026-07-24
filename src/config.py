@@ -119,6 +119,9 @@ DEFAULT_EXPORT_KEEP_TRANSPARENCY = True
 DEFAULT_HOTKEY_CAPTURE_REGION = "ctrl+shift+a"
 DEFAULT_HOTKEY_CAPTURE_WINDOW = "ctrl+shift+w"
 DEFAULT_HOTKEY_CAPTURE_FULLSCREEN = "ctrl+shift+f"
+DEFAULT_HOTKEY_CAPTURE_VIDEO = "ctrl+shift+v"
+DEFAULT_HOTKEY_RECORDING_PAUSE_RESUME = "ctrl+shift+p"
+DEFAULT_HOTKEY_RECORDING_STOP = "ctrl+shift+r"
 
 
 def default_capture_save_directory() -> str:
@@ -455,6 +458,9 @@ class AppConfig:
         hotkey_capture_region: Hotkey for region capture.
         hotkey_capture_window: Hotkey for window capture.
         hotkey_capture_fullscreen: Hotkey for fullscreen capture.
+        hotkey_capture_video: Hotkey for starting a video recording.
+        hotkey_recording_pause_resume: Hotkey to pause/resume an active recording.
+        hotkey_recording_stop: Hotkey to stop an active recording.
         post_capture_action: Action after a successful capture.
         capture_save_directory: Optional folder for automatic capture saves.
         editor_last_tab_behavior: Behavior when the last editor tab is closed.
@@ -478,6 +484,9 @@ class AppConfig:
     hotkey_capture_region: str = DEFAULT_HOTKEY_CAPTURE_REGION
     hotkey_capture_window: str = DEFAULT_HOTKEY_CAPTURE_WINDOW
     hotkey_capture_fullscreen: str = DEFAULT_HOTKEY_CAPTURE_FULLSCREEN
+    hotkey_capture_video: str = DEFAULT_HOTKEY_CAPTURE_VIDEO
+    hotkey_recording_pause_resume: str = DEFAULT_HOTKEY_RECORDING_PAUSE_RESUME
+    hotkey_recording_stop: str = DEFAULT_HOTKEY_RECORDING_STOP
     post_capture_action: str = DEFAULT_POST_CAPTURE_ACTION
     capture_save_directory: str = ""
     editor_last_tab_behavior: str = DEFAULT_EDITOR_LAST_TAB_BEHAVIOR
@@ -571,6 +580,20 @@ class ConfigManager:
                     )
                 )
             ),
+            hotkey_capture_video=normalize_hotkey_spec(
+                str(payload.get("hotkey_capture_video", DEFAULT_HOTKEY_CAPTURE_VIDEO))
+            ),
+            hotkey_recording_pause_resume=normalize_hotkey_spec(
+                str(
+                    payload.get(
+                        "hotkey_recording_pause_resume",
+                        DEFAULT_HOTKEY_RECORDING_PAUSE_RESUME,
+                    )
+                )
+            ),
+            hotkey_recording_stop=normalize_hotkey_spec(
+                str(payload.get("hotkey_recording_stop", DEFAULT_HOTKEY_RECORDING_STOP))
+            ),
             post_capture_action=normalize_post_capture_action(
                 str(payload.get("post_capture_action", DEFAULT_POST_CAPTURE_ACTION))
             ),
@@ -649,6 +672,11 @@ class ConfigManager:
             "hotkey_capture_fullscreen": normalize_hotkey_spec(
                 config.hotkey_capture_fullscreen
             ),
+            "hotkey_capture_video": normalize_hotkey_spec(config.hotkey_capture_video),
+            "hotkey_recording_pause_resume": normalize_hotkey_spec(
+                config.hotkey_recording_pause_resume
+            ),
+            "hotkey_recording_stop": normalize_hotkey_spec(config.hotkey_recording_stop),
             "post_capture_action": normalize_post_capture_action(config.post_capture_action),
             "capture_save_directory": config.capture_save_directory.strip(),
             "editor_last_tab_behavior": normalize_editor_last_tab_behavior(
